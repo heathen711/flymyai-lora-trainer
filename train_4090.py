@@ -40,6 +40,11 @@ from diffusers.loaders import AttnProcsLayers
 import gc
 from utils.cuda_utils import enable_tf32, supports_feature
 # FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
+from utils.unified_memory import (
+    is_unified_memory_system,
+    get_memory_config,
+    setup_unified_memory_env,
+)
 
 
 def parse_args():
@@ -89,6 +94,12 @@ def lora_processors(model):
 
 def main():
     args = OmegaConf.load(parse_args())
+
+    # Setup unified memory environment if applicable
+    if getattr(args, 'unified_memory', False):
+        setup_unified_memory_env()
+        logger.info("Unified memory mode enabled - disabling CPU offloading")
+
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)

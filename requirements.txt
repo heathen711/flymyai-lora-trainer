@@ -17,3 +17,4 @@ qwen_vl_utils==0.0.11
 bitsandbytes
 loguru==0.7.3
 diffusers @ git+https://github.com/huggingface/diffusers@7a2b78bf0f788d311cc96b61e660a8e13e3b1e63
+fastsafetensors>=0.1.0

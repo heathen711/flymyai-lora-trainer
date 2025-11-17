@@ -45,3 +45,13 @@ def test_load_with_num_threads():
         # Should not raise with num_threads parameter
         loaded = load_safetensors(test_path, num_threads=4)
         assert "weight" in loaded
+
+
+def test_load_nonexistent_file():
+    """Test that loading a nonexistent file raises FileNotFoundError."""
+    from utils.fast_loading import load_safetensors
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        load_safetensors("/nonexistent/path/file.safetensors")
+
+    assert "Safetensors file not found" in str(exc_info.value)

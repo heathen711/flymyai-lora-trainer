@@ -3,8 +3,9 @@ FastSafeTensors utility functions for optimized model loading and saving.
 
 Provides multi-threaded loading and memory-mapped access for safetensors files.
 """
+import os
 import torch
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 
 try:
     from fastsafetensors import fastsafe_open
@@ -28,22 +29,33 @@ def load_safetensors(
 
     Args:
         path: Path to the safetensors file
-        num_threads: Number of threads for parallel loading (default: 8)
-                     Note: fastsafetensors uses its own optimization, this param is for API compatibility
+        num_threads: Number of threads (reserved for future API compatibility)
         device: Device to load tensors to (default: "cpu")
 
     Returns:
         Dictionary of tensor name to tensor
+
+    Raises:
+        FileNotFoundError: If the file does not exist
+        RuntimeError: If the file is corrupted or cannot be loaded
     """
-    if FASTSAFETENSORS_AVAILABLE:
-        state_dict = {}
-        with fastsafe_open(path, framework="pt", device=device) as f:
-            for key in f.keys():
-                state_dict[key] = f.get_tensor(key)
-        return state_dict
-    else:
-        # Fallback to standard safetensors
-        return st_load_file(path, device=device)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Safetensors file not found: {path}")
+
+    try:
+        if FASTSAFETENSORS_AVAILABLE:
+            state_dict = {}
+            with fastsafe_open(path, framework="pt", device=device) as f:
+                for key in f.keys():
+                    state_dict[key] = f.get_tensor(key)
+            return state_dict
+        else:
+            # Fallback to standard safetensors
+            return st_load_file(path, device=device)
+    except FileNotFoundError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Failed to load safetensors file {path}: {e}") from e
 
 
 def save_safetensors(
@@ -58,11 +70,17 @@ def save_safetensors(
         state_dict: Dictionary of tensor name to tensor
         path: Output path for the safetensors file
         metadata: Optional metadata dictionary
+
+    Raises:
+        RuntimeError: If the file cannot be saved
     """
     if metadata is None:
         metadata = {"format": "pt"}
 
-    st_save_file(state_dict, path, metadata=metadata)
+    try:
+        st_save_file(state_dict, path, metadata=metadata)
+    except Exception as e:
+        raise RuntimeError(f"Failed to save safetensors file to {path}: {e}") from e
 
 
 def is_fastsafetensors_available() -> bool:

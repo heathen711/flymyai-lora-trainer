@@ -186,18 +186,45 @@ DeprecationWarning: CUDA 12.1 detected. Recommend upgrading to 13.0 for best per
 
 ## ⚡ FastSafeTensors Integration
 
-This project uses fastsafetensors for optimized model loading. Benefits include:
-- Multi-threaded tensor loading (2-3x faster)
-- Memory-mapped file access
-- Reduced peak memory usage during loading
+This project includes fastsafetensors for optimized safetensors file operations.
+
+### Current Status
+
+The integration provides:
+- **Utility module** (`utils/fast_loading.py`) with optimized load/save functions
+- **Performance benchmarking** script for measuring loading speedups
+- **Configuration options** in training YAML files (reserved for future use)
+
+The utility functions are available for:
+- Loading checkpoint weights during training resume
+- Custom model loading workflows
+- Performance benchmarking
+
+### Using the Utilities
+
+```python
+from utils.fast_loading import load_safetensors, save_safetensors, is_fastsafetensors_available
+
+# Check availability
+if is_fastsafetensors_available():
+    print("Using fastsafetensors for optimized loading")
+
+# Load a safetensors file
+state_dict = load_safetensors("model.safetensors", device="cpu")
+
+# Save a state dict
+save_safetensors(state_dict, "output.safetensors", metadata={"format": "pt"})
+```
 
 ### Configuration
 
-In your training config YAML:
+In your training config YAML (reserved for future use):
 ```yaml
 use_fastsafetensors: true
 fastsafetensors_num_threads: 8
 ```
+
+Note: These options are placeholders for future integration. The current training scripts use diffusers' native checkpoint handling.
 
 ### Benchmarking
 
@@ -208,7 +235,7 @@ python benchmarks/loading_benchmark.py
 
 ### Fallback Behavior
 
-The utility automatically falls back to standard safetensors if fastsafetensors is not available, ensuring backward compatibility.
+If fastsafetensors is not installed, the utilities automatically fall back to standard safetensors. This ensures compatibility across all environments.
 
 ---
 

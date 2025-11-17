@@ -4,7 +4,6 @@ FastSafeTensors utility functions for optimized model loading and saving.
 Provides multi-threaded loading and memory-mapped access for safetensors files.
 """
 import torch
-from pathlib import Path
 from typing import Dict, Any, Optional
 
 try:

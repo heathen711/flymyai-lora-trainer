@@ -39,7 +39,7 @@ from diffusers.training_utils import (
 logger = get_logger(__name__, log_level="INFO")
 from diffusers import FluxPipeline
 from utils.cuda_utils import enable_tf32, supports_feature
-from utils.fast_loading import load_safetensors, save_safetensors, is_fastsafetensors_available
+# FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")

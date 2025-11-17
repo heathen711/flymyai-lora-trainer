@@ -6,12 +6,30 @@
 - H100 PCIe / SXM
 - H200
 - DGX H100
+- **Grace Hopper (GH200) - aarch64-sbsa**
 
 **Full CUDA 13.0 features:**
-- Flash Attention 3
+- Flash Attention 3 (⚠️ unstable on aarch64)
 - Native FP8 training
 - TF32 compute
-- Unified memory (DGX Spark)
+- Unified memory (DGX Spark, GH200)
+
+### Grace Architecture - aarch64-sbsa (ARM64 SBSA)
+- **Grace Hopper GH200** (SM90, 480GB unified memory)
+- **DGX SPARK** (SM121)
+- **Jetson Thor** (SM110)
+
+**CUDA 13.0 features (aarch64-sbsa):**
+- TF32 compute ✅
+- BF16 training ✅
+- cuDNN SDP attention ✅
+- Flash Attention 3 ⚠️ (unstable, GCC13 bugs)
+- Unified memory ✅
+
+**Installation:** Use `./scripts/install_cuda13_aarch64.sh`
+**Config:** Use `train_configs/train_aarch64_optimized.yaml`
+
+See [AARCH64_SBSA_COMPATIBILITY.md](./AARCH64_SBSA_COMPATIBILITY.md) for details.
 
 ### Ampere Architecture (Compute Capability 8.0-8.6)
 - A100 (8.0)

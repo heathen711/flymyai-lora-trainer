@@ -116,9 +116,11 @@ This project supports CUDA 13.0 with automatic feature detection and backward co
 - NVIDIA Driver: 550.x or newer
 - CUDA Toolkit: 13.0
 - GPU: Hopper (H100/H200) for full features, Ampere (A100/RTX 30xx/40xx) for partial support
+- **ARM64 SBSA**: Grace Hopper (GH200), DGX SPARK, Jetson Thor
 
 ### Setup
 
+**x86_64 Systems:**
 ```bash
 # Setup CUDA 13.0 environment
 ./scripts/setup_cuda13.sh
@@ -132,6 +134,18 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 # 2. Install remaining dependencies from PyPI
 pip install -r requirements-cuda13.txt
 ```
+
+**aarch64-sbsa (ARM64) Systems:**
+```bash
+# For Grace Hopper, DGX SPARK, Jetson Thor
+./scripts/install_cuda13_aarch64.sh
+
+# Uses aarch64-optimized config
+python train.py --config train_configs/train_aarch64_optimized.yaml
+```
+
+⚠️ **Note**: Flash Attention 3 is NOT stable on CUDA 13.0 + aarch64 due to GCC13 bugs.
+See [docs/AARCH64_SBSA_COMPATIBILITY.md](docs/AARCH64_SBSA_COMPATIBILITY.md) for details.
 
 ### Features by Architecture
 

@@ -34,3 +34,7 @@ cuda_13_features:
   enable_fp8_training: false       # Hopper+ only
   enable_tf32_compute: true        # Ampere+
   enable_cudnn_sdp: true           # Scaled dot-product attention
+
+# FastSafeTensors configuration
+use_fastsafetensors: true
+fastsafetensors_num_threads: 8

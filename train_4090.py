@@ -241,7 +241,7 @@ def main():
     flux_transformer = QwenImageTransformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="transformer",    )
-    if args.quantize:
+    if args.quantize and not getattr(args, 'disable_quantization', False):
         torch_dtype = weight_dtype
         device = accelerator.device
         all_blocks = list(flux_transformer.transformer_blocks)
@@ -249,12 +249,16 @@ def main():
             block.to(device, dtype=torch_dtype)
             quantize(block, weights=qfloat8)
             freeze(block)
-            block.to('cpu')
+            if not getattr(args, 'unified_memory', False):
+                block.to('cpu')
         flux_transformer.to(device, dtype=torch_dtype)
         quantize(flux_transformer, weights=qfloat8)
         freeze(flux_transformer)
         #quantize(flux_transformer, weights=qint8, activations=qint8)
         #freeze(flux_transformer)
+    elif getattr(args, 'disable_quantization', False):
+        logger.info("Quantization disabled (unified memory mode)")
+        flux_transformer.to(accelerator.device, dtype=weight_dtype)
         
     lora_config = LoraConfig(
         r=args.rank,

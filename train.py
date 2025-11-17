@@ -31,6 +31,7 @@ from omegaconf import OmegaConf
 from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 import transformers
+from utils.cuda_utils import enable_tf32, supports_feature, get_optimal_settings
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -68,6 +69,11 @@ def main():
         model = accelerator.unwrap_model(model)
         model = model._orig_mod if is_compiled_module(model) else model
         return model
+
+    # Enable TF32 for improved performance on Ampere+
+    enable_tf32()
+    if supports_feature("tf32_compute"):
+        logger.info("TF32 compute enabled for improved performance")
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(

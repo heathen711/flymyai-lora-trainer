@@ -44,6 +44,11 @@ logger = get_logger(__name__, log_level="INFO")
 from diffusers import FluxPipeline
 from utils.cuda_utils import enable_tf32, supports_feature
 # FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
+from utils.unified_memory import (
+    is_unified_memory_system,
+    get_memory_config,
+    setup_unified_memory_env,
+)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -62,6 +67,11 @@ def parse_args():
 
 def main():
     args = OmegaConf.load(parse_args())
+
+    # Setup unified memory environment if configured
+    if getattr(args, 'unified_memory', False):
+        setup_unified_memory_env()
+
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)

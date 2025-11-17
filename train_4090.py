@@ -39,6 +39,7 @@ logger = get_logger(__name__, log_level="INFO")
 from diffusers.loaders import AttnProcsLayers
 import gc
 from utils.cuda_utils import enable_tf32, supports_feature
+# FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
 
 
 def parse_args():

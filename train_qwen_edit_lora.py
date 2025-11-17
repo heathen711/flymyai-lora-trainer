@@ -41,6 +41,7 @@ from diffusers import QwenImageEditPipeline
 import gc
 import math
 from utils.cuda_utils import enable_tf32, supports_feature
+# FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
 
 
 def parse_args():

@@ -33,6 +33,7 @@ from peft.utils import get_peft_model_state_dict
 import transformers
 from utils.cuda_utils import enable_tf32, supports_feature, get_optimal_settings
 from utils.compat import show_compatibility_warnings
+# FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
 
 logger = get_logger(__name__, log_level="INFO")
 

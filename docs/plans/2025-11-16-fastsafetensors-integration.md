@@ -723,3 +723,291 @@ Key files modified:
 - All train_configs/*.yaml files
 - benchmarks/loading_benchmark.py (new)
 - README.md
+
+---
+
+## Code Review Remediation Tasks
+
+**Issue:** Code review found critical issues with the current implementation. The following tasks fix those issues.
+
+---
+
+## Task 14: Fix Test to Check Correct API
+
+**Files:**
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/tests/test_fastsafetensors.py`
+
+**Step 1: Update test to check for fastsafe_open instead of SafeTensorsFileLoader**
+
+Current test checks for `SafeTensorsFileLoader` but implementation uses `fastsafe_open`.
+
+```python
+# tests/test_fastsafetensors.py
+import pytest
+
+
+def test_fastsafetensors_import():
+    """Test that fastsafetensors can be imported."""
+    import fastsafetensors
+    assert hasattr(fastsafetensors, 'fastsafe_open')
+```
+
+**Step 2: Commit**
+
+```bash
+git add tests/test_fastsafetensors.py
+git commit -m "fix: update test to check for fastsafe_open API"
+```
+
+---
+
+## Task 15: Remove Unused Path Import
+
+**Files:**
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/utils/fast_loading.py`
+
+**Step 1: Remove unused Path import from line 7**
+
+```python
+# Remove this line:
+from pathlib import Path
+```
+
+**Step 2: Commit**
+
+```bash
+git add utils/fast_loading.py
+git commit -m "refactor: remove unused Path import from fast_loading.py"
+```
+
+---
+
+## Task 16: Remove Unused Imports from Training Scripts
+
+**Files:**
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/train.py`
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/train_4090.py`
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/train_flux_lora.py`
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/train_qwen_edit_lora.py`
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/train_kandinsky_lora.py`
+
+**Rationale:** The training scripts import `load_safetensors` and `is_fastsafetensors_available` but never use them. This is dead code. The fastsafetensors integration provides utility functions that can be used when resuming training from checkpoints or for future model loading optimizations. Remove the unused imports to clean up the code.
+
+**Step 1: Remove unused import from train.py (line 36)**
+
+Change:
+```python
+from utils.fast_loading import load_safetensors, is_fastsafetensors_available
+```
+To:
+```python
+# FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
+```
+
+**Step 2: Remove unused import from train_4090.py**
+
+Remove or comment the fastsafetensors import line.
+
+**Step 3: Remove unused import from train_flux_lora.py**
+
+Remove or comment the fastsafetensors import line.
+
+**Step 4: Remove unused import from train_qwen_edit_lora.py**
+
+Remove or comment the fastsafetensors import line.
+
+**Step 5: Remove unused import from train_kandinsky_lora.py**
+
+Remove or comment the fastsafetensors import line.
+
+**Step 6: Commit**
+
+```bash
+git add train.py train_4090.py train_flux_lora.py train_qwen_edit_lora.py train_kandinsky_lora.py
+git commit -m "refactor: remove unused fastsafetensors imports from training scripts
+
+The fastsafetensors utility module is available for checkpoint loading operations.
+Current training scripts use diffusers' native save_lora_weights() which handles
+serialization internally. The utility functions remain available for future use."
+```
+
+---
+
+## Task 17: Update Documentation to Clarify Current Integration Status
+
+**Files:**
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/README.md`
+
+**Step 1: Update FastSafeTensors section to clarify actual usage**
+
+Update the documentation to accurately reflect what's currently integrated:
+
+```markdown
+## FastSafeTensors Integration
+
+This project includes fastsafetensors for optimized safetensors file operations.
+
+### Current Status
+
+The integration provides:
+- **Utility module** (`utils/fast_loading.py`) with optimized load/save functions
+- **Performance benchmarking** script for measuring loading speedups
+- **Configuration options** in training YAML files
+
+The utility functions are available for:
+- Loading checkpoint weights during training resume
+- Custom model loading workflows
+- Performance benchmarking
+
+### Configuration
+
+In your training config YAML:
+```yaml
+# FastSafeTensors configuration (for future use)
+use_fastsafetensors: true
+fastsafetensors_num_threads: 8
+```
+
+Note: The `num_threads` parameter is reserved for future API compatibility. The current implementation uses fastsafetensors' internal optimizations.
+
+### Using the Utilities
+
+```python
+from utils.fast_loading import load_safetensors, save_safetensors, is_fastsafetensors_available
+
+# Check availability
+if is_fastsafetensors_available():
+    print("Using fastsafetensors for optimized loading")
+
+# Load a safetensors file
+state_dict = load_safetensors("model.safetensors", device="cpu")
+
+# Save a state dict
+save_safetensors(state_dict, "output.safetensors", metadata={"format": "pt"})
+```
+
+### Benchmarking
+
+To benchmark loading performance:
+```bash
+python benchmarks/loading_benchmark.py
+```
+
+### Fallback Behavior
+
+If fastsafetensors is not installed, the utilities automatically fall back to standard safetensors. This ensures compatibility across all environments.
+```
+
+**Step 2: Commit**
+
+```bash
+git add README.md
+git commit -m "docs: clarify fastsafetensors integration status and usage"
+```
+
+---
+
+## Task 18: Add Error Handling to Utility Functions
+
+**Files:**
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/utils/fast_loading.py`
+
+**Step 1: Add error handling for file operations**
+
+```python
+def load_safetensors(
+    path: str,
+    num_threads: int = 8,
+    device: str = "cpu"
+) -> Dict[str, torch.Tensor]:
+    """
+    Load a safetensors file using fastsafetensors for optimized performance.
+
+    Args:
+        path: Path to the safetensors file
+        num_threads: Number of threads (reserved for future API compatibility)
+        device: Device to load tensors to (default: "cpu")
+
+    Returns:
+        Dictionary of tensor name to tensor
+
+    Raises:
+        FileNotFoundError: If the file does not exist
+        RuntimeError: If the file is corrupted or cannot be loaded
+    """
+    import os
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Safetensors file not found: {path}")
+
+    try:
+        if FASTSAFETENSORS_AVAILABLE:
+            state_dict = {}
+            with fastsafe_open(path, framework="pt", device=device) as f:
+                for key in f.keys():
+                    state_dict[key] = f.get_tensor(key)
+            return state_dict
+        else:
+            # Fallback to standard safetensors
+            return st_load_file(path, device=device)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load safetensors file {path}: {e}") from e
+
+
+def save_safetensors(
+    state_dict: Dict[str, torch.Tensor],
+    path: str,
+    metadata: Optional[Dict[str, str]] = None
+) -> None:
+    """
+    Save a state dict to a safetensors file.
+
+    Args:
+        state_dict: Dictionary of tensor name to tensor
+        path: Output path for the safetensors file
+        metadata: Optional metadata dictionary
+
+    Raises:
+        RuntimeError: If the file cannot be saved
+    """
+    if metadata is None:
+        metadata = {"format": "pt"}
+
+    try:
+        st_save_file(state_dict, path, metadata=metadata)
+    except Exception as e:
+        raise RuntimeError(f"Failed to save safetensors file to {path}: {e}") from e
+```
+
+**Step 2: Update tests to verify error handling**
+
+Add to `/home/jay/Documents/flymyai-lora-trainer/tests/test_fast_loading.py`:
+
+```python
+def test_load_nonexistent_file():
+    """Test that loading a nonexistent file raises FileNotFoundError."""
+    from utils.fast_loading import load_safetensors
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        load_safetensors("/nonexistent/path/file.safetensors")
+```
+
+**Step 3: Commit**
+
+```bash
+git add utils/fast_loading.py tests/test_fast_loading.py
+git commit -m "feat: add error handling to fastsafetensors utility functions"
+```
+
+---
+
+## Remediation Summary
+
+Tasks 14-18 fix the critical and important issues found in code review:
+- Task 14: Fix API mismatch in test
+- Task 15: Remove unused Path import
+- Task 16: Remove dead code (unused imports)
+- Task 17: Update documentation to reflect actual status
+- Task 18: Add error handling for robustness
+
+After these tasks, the integration will be clean, honest about its current status, and ready for future enhancements.

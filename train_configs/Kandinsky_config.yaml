@@ -27,3 +27,7 @@ resume_from_checkpoint: latest
 gradient_accumulation_steps: 1
 rank: 16
 quantize: true
+
+# FastSafeTensors configuration
+use_fastsafetensors: true
+fastsafetensors_num_threads: 8

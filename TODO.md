@@ -403,9 +403,10 @@ This document outlines improvements for fastsafetensors integration, DGX Spark u
 | FastSafeTensors Integration | 16-24 | Medium |
 | DGX Spark Unified Memory | 24-32 | High |
 | CUDA 13.0 Upgrade | 20-28 | Medium-High |
+| Docker Container Setup | 16-24 | Medium |
 | Integration Testing | 12-16 | Medium |
 | Documentation | 8-12 | Low |
-| **Total** | **80-112 hours** | |
+| **Total** | **96-136 hours** | |
 
 ---
 
@@ -419,9 +420,317 @@ This document outlines improvements for fastsafetensors integration, DGX Spark u
 
 ---
 
+## 8. Docker Container Setup
+
+**Goal**: Create a containerized environment for CUDA 13.0, DGX Spark unified memory, and fastsafetensors.
+
+### 8.1 Base Dockerfile Structure
+- [ ] Create `Dockerfile` with CUDA 13.0 base image:
+  ```dockerfile
+  # Base image options:
+  # - nvidia/cuda:13.0.0-devel-ubuntu22.04 (full toolkit)
+  # - nvidia/cuda:13.0.0-runtime-ubuntu22.04 (smaller, runtime only)
+  # - nvcr.io/nvidia/pytorch:24.xx-py3 (NGC optimized)
+  FROM nvidia/cuda:13.0.0-devel-ubuntu22.04
+
+  # System dependencies
+  RUN apt-get update && apt-get install -y \
+      python3.10 python3.10-dev python3-pip \
+      git wget curl \
+      libgl1-mesa-glx libglib2.0-0 \
+      && rm -rf /var/lib/apt/lists/*
+
+  # Set Python 3.10 as default
+  RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
+  RUN update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+  ```
+
+- [ ] Add PyTorch installation layer:
+  ```dockerfile
+  # Install PyTorch with CUDA 13.0 support
+  RUN pip install --no-cache-dir \
+      torch==2.6.0+cu130 \
+      torchvision==0.23.0+cu130 \
+      torchaudio==2.6.0+cu130 \
+      --index-url https://download.pytorch.org/whl/cu130
+  ```
+
+### 8.2 Dependencies Layer
+- [ ] Install core ML dependencies:
+  ```dockerfile
+  # Core dependencies
+  COPY requirements.txt /app/requirements.txt
+  RUN pip install --no-cache-dir -r /app/requirements.txt
+
+  # FastSafeTensors
+  RUN pip install --no-cache-dir fastsafetensors
+
+  # Additional CUDA 13.0 optimized packages
+  RUN pip install --no-cache-dir \
+      flash-attn>=2.6.0 \
+      xformers>=0.0.28
+  ```
+
+- [ ] Handle diffusers git installation:
+  ```dockerfile
+  # Install diffusers from specific commit
+  RUN pip install --no-cache-dir \
+      git+https://github.com/huggingface/diffusers@7a2b78bf0f788d311cc96b61e660a8e13e3b1e63
+  ```
+
+### 8.3 DGX Spark Unified Memory Configuration
+- [ ] Add unified memory environment variables:
+  ```dockerfile
+  # DGX Spark unified memory settings
+  ENV CUDA_MANAGED_FORCE_DEVICE_ALLOC=1
+  ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,backend:native
+  ENV CUDA_VISIBLE_DEVICES=all
+
+  # Grace Hopper specific optimizations
+  ENV NVIDIA_VISIBLE_DEVICES=all
+  ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+  ```
+
+- [ ] Configure memory pooling:
+  ```dockerfile
+  # Unified memory pool settings
+  ENV CUDA_DEVICE_MAX_CONNECTIONS=32
+  ENV NCCL_P2P_DISABLE=0
+  ENV NCCL_SHM_DISABLE=0
+  ```
+
+### 8.4 Application Setup
+- [ ] Copy application code:
+  ```dockerfile
+  WORKDIR /app
+
+  # Copy training scripts
+  COPY train*.py /app/
+  COPY inference.py /app/
+  COPY image_datasets/ /app/image_datasets/
+  COPY train_configs/ /app/train_configs/
+  COPY utils/ /app/utils/
+
+  # Create directories for data and checkpoints
+  RUN mkdir -p /app/data /app/checkpoints /app/cache
+  ```
+
+- [ ] Set up entry point:
+  ```dockerfile
+  # Default entry point
+  ENTRYPOINT ["python"]
+  CMD ["train.py", "--config", "train_configs/train_dgx_spark.yaml"]
+  ```
+
+### 8.5 Multi-Stage Build (Production)
+- [ ] Create optimized production image:
+  ```dockerfile
+  # Build stage
+  FROM nvidia/cuda:13.0.0-devel-ubuntu22.04 AS builder
+  # ... install build dependencies ...
+
+  # Production stage
+  FROM nvidia/cuda:13.0.0-runtime-ubuntu22.04 AS production
+  COPY --from=builder /usr/local/lib/python3.10 /usr/local/lib/python3.10
+  COPY --from=builder /app /app
+  ```
+
+- [ ] Reduce image size:
+  - Remove build tools after compilation
+  - Use slim base images where possible
+  - Clean pip cache and apt lists
+
+### 8.6 Docker Compose Configuration
+- [ ] Create `docker-compose.yml`:
+  ```yaml
+  version: '3.8'
+  services:
+    lora-trainer:
+      build: .
+      runtime: nvidia
+      environment:
+        - NVIDIA_VISIBLE_DEVICES=all
+        - CUDA_MANAGED_FORCE_DEVICE_ALLOC=1
+      volumes:
+        - ./data:/app/data
+        - ./checkpoints:/app/checkpoints
+        - ./train_configs:/app/train_configs
+      deploy:
+        resources:
+          reservations:
+            devices:
+              - driver: nvidia
+                count: all
+                capabilities: [gpu, compute, utility]
+      shm_size: '64gb'  # Shared memory for large models
+  ```
+
+- [ ] Add service variants:
+  ```yaml
+  # DGX Spark optimized service
+  dgx-spark-trainer:
+    extends: lora-trainer
+    environment:
+      - UNIFIED_MEMORY=true
+      - DISABLE_CPU_OFFLOAD=true
+    shm_size: '128gb'
+
+  # Standard GPU service (RTX 4090, A100, etc.)
+  standard-trainer:
+    extends: lora-trainer
+    environment:
+      - UNIFIED_MEMORY=false
+    shm_size: '32gb'
+  ```
+
+### 8.7 NVIDIA Container Toolkit Integration
+- [ ] Document NVIDIA Container Toolkit requirements:
+  ```bash
+  # Host requirements
+  # - NVIDIA Driver >= 550.x (for CUDA 13.0)
+  # - nvidia-container-toolkit >= 1.16.0
+  # - Docker >= 24.0 with nvidia runtime
+  ```
+
+- [ ] Add runtime configuration:
+  ```dockerfile
+  # /etc/docker/daemon.json
+  {
+    "runtimes": {
+      "nvidia": {
+        "path": "nvidia-container-runtime",
+        "runtimeArgs": []
+      }
+    },
+    "default-runtime": "nvidia"
+  }
+  ```
+
+### 8.8 Model Caching Strategy
+- [ ] Add HuggingFace cache volume:
+  ```dockerfile
+  ENV HF_HOME=/app/cache/huggingface
+  ENV TRANSFORMERS_CACHE=/app/cache/huggingface
+  VOLUME /app/cache
+  ```
+
+- [ ] Pre-download models during build (optional):
+  ```dockerfile
+  # Pre-cache common models
+  RUN python -c "from huggingface_hub import snapshot_download; \
+      snapshot_download('Qwen/Qwen-Image', cache_dir='/app/cache/huggingface')"
+  ```
+
+### 8.9 Health Checks & Monitoring
+- [ ] Add container health check:
+  ```dockerfile
+  HEALTHCHECK --interval=30s --timeout=10s --start-period=60s \
+      CMD python -c "import torch; assert torch.cuda.is_available()" || exit 1
+  ```
+
+- [ ] Add monitoring endpoints:
+  ```dockerfile
+  # Optional: Add Prometheus metrics
+  EXPOSE 9090
+  ```
+
+### 8.10 Security Considerations
+- [ ] Run as non-root user:
+  ```dockerfile
+  RUN useradd -m -u 1000 trainer
+  USER trainer
+  WORKDIR /home/trainer/app
+  ```
+
+- [ ] Add security scanning:
+  ```bash
+  # Scan image for vulnerabilities
+  docker scout cve <image>
+  trivy image <image>
+  ```
+
+### 8.11 CI/CD Pipeline
+- [ ] Create `.dockerignore`:
+  ```
+  .git/
+  __pycache__/
+  *.pyc
+  checkpoints/
+  data/
+  *.safetensors
+  .env
+  ```
+
+- [ ] Add GitHub Actions workflow for image build:
+  ```yaml
+  # .github/workflows/docker.yml
+  name: Build Docker Image
+  on: [push, pull_request]
+  jobs:
+    build:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: docker/build-push-action@v5
+  ```
+
+### 8.12 Documentation
+- [ ] Create `DOCKER.md` with:
+  - Build instructions
+  - Run commands for different configurations
+  - Volume mounting guide
+  - Environment variable reference
+  - Troubleshooting common issues
+
+- [ ] Add example run commands:
+  ```bash
+  # Build image
+  docker build -t lora-trainer:cuda13 .
+
+  # Run on DGX Spark
+  docker run --gpus all --shm-size=128g \
+      -v $(pwd)/data:/app/data \
+      -v $(pwd)/checkpoints:/app/checkpoints \
+      -e UNIFIED_MEMORY=true \
+      lora-trainer:cuda13
+
+  # Run on standard GPU
+  docker run --gpus all --shm-size=32g \
+      -v $(pwd)/data:/app/data \
+      -v $(pwd)/checkpoints:/app/checkpoints \
+      lora-trainer:cuda13
+  ```
+
+### 8.13 Testing Container
+- [ ] Create test script for container validation:
+  ```bash
+  # test_container.sh
+  docker run --gpus all lora-trainer:cuda13 python -c "
+  import torch
+  import fastsafetensors
+  print(f'PyTorch: {torch.__version__}')
+  print(f'CUDA: {torch.version.cuda}')
+  print(f'GPU: {torch.cuda.get_device_name(0)}')
+  print(f'Unified Memory Available: {torch.cuda.mem_get_info()}')
+  "
+  ```
+
+- [ ] Validate all training scripts run within container
+- [ ] Test model loading performance
+- [ ] Verify checkpoint saving/loading
+
+### 8.14 Estimated Container Sizes
+| Image Type | Estimated Size | Use Case |
+|------------|----------------|----------|
+| Full devel | ~15-20 GB | Development, debugging |
+| Runtime only | ~10-12 GB | Production training |
+| Multi-stage optimized | ~8-10 GB | CI/CD, deployment |
+
+---
+
 ## Notes
 
 - **fastsafetensors** provides memory-mapped loading and multi-threaded deserialization
 - **DGX Spark** uses Grace Hopper architecture with 128GB unified CPU-GPU memory
 - **CUDA 13.0** introduces FP8 training, improved Flash Attention, and better memory management
 - All changes should maintain backward compatibility with CUDA 12.x and standard GPU systems
+- **Docker container** encapsulates all dependencies for reproducible environments

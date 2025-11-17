@@ -184,6 +184,34 @@ DeprecationWarning: CUDA 12.1 detected. Recommend upgrading to 13.0 for best per
 
 ---
 
+## ⚡ FastSafeTensors Integration
+
+This project uses fastsafetensors for optimized model loading. Benefits include:
+- Multi-threaded tensor loading (2-3x faster)
+- Memory-mapped file access
+- Reduced peak memory usage during loading
+
+### Configuration
+
+In your training config YAML:
+```yaml
+use_fastsafetensors: true
+fastsafetensors_num_threads: 8
+```
+
+### Benchmarking
+
+To benchmark loading performance:
+```bash
+python benchmarks/loading_benchmark.py
+```
+
+### Fallback Behavior
+
+The utility automatically falls back to standard safetensors if fastsafetensors is not available, ensuring backward compatibility.
+
+---
+
 ## 📁 Data Preparation
 
 ### Dataset Structure for Training

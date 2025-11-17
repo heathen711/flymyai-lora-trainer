@@ -27,3 +27,10 @@ tracker_project_name: lora_test
 resume_from_checkpoint: latest
 gradient_accumulation_steps: 1
 rank: 16
+
+# CUDA 13.0 Features (requires CUDA 13.0 and compatible GPU)
+cuda_13_features:
+  enable_flash_attention_3: false  # Hopper+ only
+  enable_fp8_training: false       # Hopper+ only
+  enable_tf32_compute: true        # Ampere+
+  enable_cudnn_sdp: true           # Scaled dot-product attention

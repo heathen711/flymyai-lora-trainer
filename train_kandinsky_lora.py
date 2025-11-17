@@ -38,6 +38,7 @@ from diffusers.training_utils import (
 )
 logger = get_logger(__name__, log_level="INFO")
 from diffusers import FluxPipeline
+from utils.cuda_utils import enable_tf32, supports_feature
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -71,6 +72,8 @@ def main():
         model = accelerator.unwrap_model(model)
         model = model._orig_mod if is_compiled_module(model) else model
         return model
+
+    enable_tf32()
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(

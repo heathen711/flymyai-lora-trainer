@@ -38,6 +38,7 @@ import bitsandbytes as bnb
 logger = get_logger(__name__, log_level="INFO")
 from diffusers.loaders import AttnProcsLayers
 import gc
+from utils.cuda_utils import enable_tf32, supports_feature
 
 
 def parse_args():
@@ -101,6 +102,10 @@ def main():
         model = accelerator.unwrap_model(model)
         model = model._orig_mod if is_compiled_module(model) else model
         return model
+
+    # Enable TF32 for improved performance (RTX 4090 = Ampere)
+    enable_tf32()
+    logger.info("TF32 compute enabled")
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(

@@ -189,9 +189,12 @@ def main():
                 del prompt_embeds_mask
             else:
                 cached_text_embeddings['empty_embedding'] = {'prompt_embeds': prompt_embeds[0].to('cpu'), 'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')}
-                    
-        text_encoding_pipeline.to("cpu")
-        torch.cuda.empty_cache()
+
+        if not getattr(args, 'unified_memory', False):
+            text_encoding_pipeline.to("cpu")
+            torch.cuda.empty_cache()
+        else:
+            logger.info("Unified memory: keeping text encoding pipeline on device")
     del text_encoding_pipeline
     gc.collect()
 
@@ -228,8 +231,11 @@ def main():
                     del pixel_latents
                 else:
                     cached_image_embeddings[img_name] = pixel_latents
-        vae.to('cpu')
-        torch.cuda.empty_cache()
+        if not getattr(args, 'unified_memory', False):
+            vae.to('cpu')
+            torch.cuda.empty_cache()
+        else:
+            logger.info("Unified memory: keeping VAE on device")
     #del vae
     gc.collect()
     flux_transformer = QwenImageTransformer2DModel.from_pretrained(

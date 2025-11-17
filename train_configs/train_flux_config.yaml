@@ -33,3 +33,7 @@ sample_every: 250 # sample every this many steps
 sample_width: 1024
 sample_height: 1024
 sample_steps: 20
+
+# FastSafeTensors configuration
+use_fastsafetensors: true
+fastsafetensors_num_threads: 8

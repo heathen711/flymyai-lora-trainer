@@ -34,3 +34,6 @@ quantize: false
 adam8bit: false
 save_cache_on_disk: false
 
+# FastSafeTensors configuration
+use_fastsafetensors: true
+fastsafetensors_num_threads: 8

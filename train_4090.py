@@ -45,6 +45,7 @@ from utils.unified_memory import (
     get_memory_config,
     setup_unified_memory_env,
 )
+from utils.memory_monitor import log_memory_usage, reset_peak_memory_stats
 
 
 def parse_args():
@@ -351,6 +352,12 @@ def main():
         desc="Steps",
         disable=not accelerator.is_local_main_process,
     )
+
+    # Initialize memory monitoring for unified memory mode
+    if getattr(args, 'unified_memory', False):
+        reset_peak_memory_stats()
+        log_memory_usage("before_training")
+
     vae_scale_factor = 2 ** len(vae.temperal_downsample)
     for epoch in range(1):
         train_loss = 0.0
@@ -502,6 +509,10 @@ def main():
                     )
 
                     logger.info(f"Saved state to {save_path}")
+
+                    # Log memory usage after checkpointing in unified memory mode
+                    if getattr(args, 'unified_memory', False):
+                        log_memory_usage(f"step_{global_step}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)

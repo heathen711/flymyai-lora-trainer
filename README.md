@@ -123,7 +123,13 @@ This project supports CUDA 13.0 with automatic feature detection and backward co
 # Setup CUDA 13.0 environment
 ./scripts/setup_cuda13.sh
 
-# Install CUDA 13.0 compatible packages
+# Install CUDA 13.0 compatible packages (tiered installation)
+./scripts/install_cuda13.sh
+
+# Or manually:
+# 1. Install PyTorch from CUDA 13.0 index
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+# 2. Install remaining dependencies from PyPI
 pip install -r requirements-cuda13.txt
 ```
 

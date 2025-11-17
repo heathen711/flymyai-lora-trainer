@@ -1,16 +1,17 @@
 # requirements-cuda13.txt
 # CUDA 13.0 compatible package versions
 #
-# Install with:
-#   pip install -r requirements-cuda13.txt --index-url https://download.pytorch.org/whl/cu130
+# IMPORTANT: Do NOT install with `pip install -r requirements-cuda13.txt`
+# Instead use the installation script:
+#   ./scripts/install_cuda13.sh
+#
+# Or install manually in order:
+#   1. pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+#   2. pip install -r requirements-cuda13.txt
+#
+# This file is for reference and for installing non-PyTorch dependencies.
 
-# Core PyTorch (CUDA 13.0) - will pull from cu130 index
---index-url https://download.pytorch.org/whl/cu130
-torch
-torchvision
-torchaudio
-
-# Training libraries
+# Training libraries (from PyPI)
 accelerate
 deepspeed
 transformers

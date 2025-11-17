@@ -107,6 +107,63 @@ Agentic Infra for GenAI. FlyMy.AI is a B2B infrastructure for building and runni
 
 ---
 
+## 🔧 CUDA 13.0 Support
+
+This project supports CUDA 13.0 with automatic feature detection and backward compatibility.
+
+### Requirements
+
+- NVIDIA Driver: 550.x or newer
+- CUDA Toolkit: 13.0
+- GPU: Hopper (H100/H200) for full features, Ampere (A100/RTX 30xx/40xx) for partial support
+
+### Setup
+
+```bash
+# Setup CUDA 13.0 environment
+./scripts/setup_cuda13.sh
+
+# Install CUDA 13.0 compatible packages
+pip install -r requirements-cuda13.txt
+```
+
+### Features by Architecture
+
+| Feature | Hopper (9.0) | Ampere (8.0) | Turing (7.5) |
+|---------|--------------|--------------|--------------|
+| Flash Attention 3 | Yes | No | No |
+| Native FP8 | Yes | No | No |
+| TF32 Compute | Yes | Yes | No |
+| Flash Attention 2 | Yes | Yes | No |
+
+### Configuration
+
+```yaml
+cuda_13_features:
+  enable_flash_attention_3: true  # Hopper only
+  enable_fp8_training: false
+  enable_tf32_compute: true       # Ampere+
+  enable_cudnn_sdp: true
+```
+
+### Backward Compatibility
+
+The code automatically detects CUDA version and enables appropriate features:
+
+```python
+from utils.cuda_utils import get_optimal_settings
+settings = get_optimal_settings()
+print(settings)
+# {'use_flash_attention_3': False, 'use_fp8': False, 'use_tf32': True, ...}
+```
+
+Warnings are shown for outdated CUDA versions:
+```
+DeprecationWarning: CUDA 12.1 detected. Recommend upgrading to 13.0 for best performance.
+```
+
+---
+
 ## 📁 Data Preparation
 
 ### Dataset Structure for Training

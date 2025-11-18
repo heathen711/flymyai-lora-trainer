@@ -332,8 +332,11 @@ def main():
             weight_decay=args.adam_weight_decay,
             eps=args.adam_epsilon,
         )
-    train_dataloader = loader(cached_text_embeddings=cached_text_embeddings, cached_image_embeddings=cached_image_embeddings, 
-                              txt_cache_dir=txt_cache_dir, img_cache_dir=img_cache_dir, **args.data_config)
+    # Configure DataLoader pin_memory based on unified memory setting
+    data_config = dict(args.data_config)
+    data_config['pin_memory'] = not getattr(args, 'unified_memory', False)
+    train_dataloader = loader(cached_text_embeddings=cached_text_embeddings, cached_image_embeddings=cached_image_embeddings,
+                              txt_cache_dir=txt_cache_dir, img_cache_dir=img_cache_dir, **data_config)
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,

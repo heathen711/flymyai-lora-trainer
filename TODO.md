@@ -9,7 +9,7 @@ This document outlines improvements for fastsafetensors integration, DGX Spark u
 **Goal**: Replace implicit safetensors usage with fastsafetensors for faster model loading and reduced memory overhead.
 
 ### 1.1 Dependencies
-- [ ] Add `fastsafetensors` to `requirements.txt`
+- [x] Add `fastsafetensors` to `requirements.txt`
 - [ ] Verify compatibility with current `diffusers` version (commit `7a2b78bf`)
 - [ ] Test fastsafetensors version compatibility with Python 3.10
 

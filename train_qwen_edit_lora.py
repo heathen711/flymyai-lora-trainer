@@ -41,7 +41,12 @@ from diffusers import QwenImageEditPipeline
 import gc
 import math
 from utils.cuda_utils import enable_tf32, supports_feature
-# FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
+# FastSafeTensors utilities for optimized checkpoint and embedding operations
+from utils.fast_loading import (
+    save_embeddings_safetensors,
+    load_embeddings_safetensors,
+    is_fastsafetensors_available,
+)
 from utils.unified_memory import (
     is_unified_memory_system,
     get_memory_config,
@@ -192,7 +197,10 @@ def main():
                     max_sequence_length=1024,
                 )
                 if args.save_cache_on_disk:
-                    torch.save({'prompt_embeds': prompt_embeds[0].to('cpu'), 'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')}, os.path.join(txt_cache_dir, txt + '.pt'))
+                    save_embeddings_safetensors(
+                        {'prompt_embeds': prompt_embeds[0].to('cpu'), 'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')},
+                        os.path.join(txt_cache_dir, txt + '.safetensors')
+                    )
                 else:
                     cached_text_embeddings[img_name.split('.')[0] + '.txt'] = {'prompt_embeds': prompt_embeds[0].to('cpu'), 'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')}
             # compute empty embedding
@@ -235,7 +243,10 @@ def main():
         
                 pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]
                 if args.save_cache_on_disk:
-                    torch.save(pixel_latents, os.path.join(img_cache_dir, img_name + '.pt'))
+                    save_embeddings_safetensors(
+                        {'latent': pixel_latents},
+                        os.path.join(img_cache_dir, img_name + '.safetensors')
+                    )
                     del pixel_latents
                 else:
                     cached_image_embeddings[img_name] = pixel_latents

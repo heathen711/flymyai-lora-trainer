@@ -36,6 +36,8 @@ import transformers
 from loguru import logger as loguru_logger
 import bitsandbytes as bnb
 import gc
+from utils.unified_memory import setup_unified_memory_env
+from utils.cuda_utils import enable_tf32
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -119,7 +121,11 @@ def save_full_model(model, save_path, accelerator, args):
 def main():
     config_path, resume_checkpoint = parse_args()
     args = OmegaConf.load(config_path)
-    
+
+    # Setup unified memory environment if configured
+    if getattr(args, 'unified_memory', False):
+        setup_unified_memory_env()
+
     # Setup logging directory
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
     
@@ -251,7 +257,10 @@ def main():
     
     # Setup data loader
     loguru_logger.info("Setting up data loader...")
-    train_dataloader = loader(**args.data_config)
+    # Configure DataLoader pin_memory based on unified memory setting
+    data_config = dict(args.data_config)
+    data_config['pin_memory'] = not getattr(args, 'unified_memory', False)
+    train_dataloader = loader(**data_config)
     
     # Setup learning rate scheduler
     lr_scheduler = get_scheduler(

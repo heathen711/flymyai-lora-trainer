@@ -144,6 +144,24 @@ class CustomImageDataset(Dataset):
             print(e)
             return self.__getitem__(random.randint(0, len(self.images) - 1))
 
-def loader(train_batch_size, num_workers, **args):
+def loader(train_batch_size, num_workers, pin_memory=True, **args):
+    """
+    Create a DataLoader for the custom image dataset.
+
+    Args:
+        train_batch_size: Batch size for training
+        num_workers: Number of data loading workers
+        pin_memory: Whether to use pinned memory (set to False for unified memory systems)
+        **args: Additional arguments passed to CustomImageDataset
+
+    Returns:
+        DataLoader instance
+    """
     dataset = CustomImageDataset(**args)
-    return DataLoader(dataset, batch_size=train_batch_size, num_workers=num_workers, shuffle=True)
+    return DataLoader(
+        dataset,
+        batch_size=train_batch_size,
+        num_workers=num_workers,
+        shuffle=True,
+        pin_memory=pin_memory
+    )

@@ -128,8 +128,12 @@ def main():
     flux_transformer = FluxTransformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="transformer"
     )
-    quantize(flux_transformer, weights=qfloat8)
-    freeze(flux_transformer)
+    # Conditional quantization based on configuration
+    if not getattr(args, 'disable_quantization', False):
+        quantize(flux_transformer, weights=qfloat8)
+        freeze(flux_transformer)
+    else:
+        logger.info("Quantization disabled (sufficient memory available)")
     lora_config = LoraConfig(
         r=args.rank,
         lora_alpha=args.rank,
@@ -142,10 +146,12 @@ def main():
     )
     flux_transformer.to(accelerator.device)
     flux_transformer.add_adapter(lora_config)
-    quantize(text_encoding_pipeline.text_encoder, weights=qfloat8)
-    freeze(text_encoding_pipeline.text_encoder)
-    quantize(text_encoding_pipeline.text_encoder_2, weights=qfloat8)
-    freeze(text_encoding_pipeline.text_encoder_2)
+    # Conditional text encoder quantization
+    if not getattr(args, 'disable_quantization', False):
+        quantize(text_encoding_pipeline.text_encoder, weights=qfloat8)
+        freeze(text_encoding_pipeline.text_encoder)
+        quantize(text_encoding_pipeline.text_encoder_2, weights=qfloat8)
+        freeze(text_encoding_pipeline.text_encoder_2)
     text_encoding_pipeline.to(accelerator.device)
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
     
@@ -184,7 +190,10 @@ def main():
         eps=args.adam_epsilon,
     )
 
-    train_dataloader = loader(**args.data_config)    
+    # Configure DataLoader pin_memory based on unified memory setting
+    data_config = dict(args.data_config)
+    data_config['pin_memory'] = not getattr(args, 'unified_memory', False)
+    train_dataloader = loader(**data_config)    
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,

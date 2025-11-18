@@ -177,7 +177,10 @@ def main():
         eps=args.adam_epsilon,
     )
 
-    train_dataloader = loader(**args.data_config)    
+    # Configure DataLoader pin_memory based on unified memory setting
+    data_config = dict(args.data_config)
+    data_config['pin_memory'] = not getattr(args, 'unified_memory', False)
+    train_dataloader = loader(**data_config)    
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,

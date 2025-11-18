@@ -272,10 +272,13 @@ def main():
                     del pixel_latents
                 else:
                     cached_image_embeddings_control[img_name] = pixel_latents
-        vae.to('cpu')
-        torch.cuda.empty_cache()
-        text_encoding_pipeline.to("cpu")
-        torch.cuda.empty_cache()
+        if not getattr(args, 'unified_memory', False):
+            vae.to('cpu')
+            torch.cuda.empty_cache()
+            text_encoding_pipeline.to("cpu")
+            torch.cuda.empty_cache()
+        else:
+            logger.info("Unified memory: keeping VAE and text encoding pipeline on device")
     del text_encoding_pipeline
     gc.collect()
     #del vae
@@ -283,7 +286,7 @@ def main():
     flux_transformer = QwenImageTransformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="transformer",    )
-    if args.quantize:
+    if args.quantize and not getattr(args, 'disable_quantization', False):
         torch_dtype = weight_dtype
         device = accelerator.device
         all_blocks = list(flux_transformer.transformer_blocks)
@@ -291,10 +294,13 @@ def main():
             block.to(device, dtype=torch_dtype)
             quantize(block, weights=qfloat8)
             freeze(block)
-            block.to('cpu')
+            if not getattr(args, 'unified_memory', False):
+                block.to('cpu')
         flux_transformer.to(device, dtype=torch_dtype)
         quantize(flux_transformer, weights=qfloat8)
         freeze(flux_transformer)
+    elif getattr(args, 'disable_quantization', False):
+        logger.info("Quantization disabled (sufficient memory available)")
         #quantize(flux_transformer, weights=qint8, activations=qint8)
         #freeze(flux_transformer)
         
@@ -355,9 +361,12 @@ def main():
             weight_decay=args.adam_weight_decay,
             eps=args.adam_epsilon,
         )
-    train_dataloader = loader(cached_text_embeddings=cached_text_embeddings, cached_image_embeddings=cached_image_embeddings, 
+    # Configure DataLoader pin_memory based on unified memory setting
+    data_config = dict(args.data_config)
+    data_config['pin_memory'] = not getattr(args, 'unified_memory', False)
+    train_dataloader = loader(cached_text_embeddings=cached_text_embeddings, cached_image_embeddings=cached_image_embeddings,
                               cached_image_embeddings_control=cached_image_embeddings_control,
-                              **args.data_config)
+                              **data_config)
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,

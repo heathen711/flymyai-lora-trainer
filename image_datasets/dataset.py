@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import json
 import random
+from utils.fast_loading import load_embeddings_safetensors
 
 def throw_one(probability: float) -> int:
     return 1 if random.random() < probability else 0
@@ -91,7 +92,16 @@ class CustomImageDataset(Dataset):
                 img = torch.from_numpy((np.array(img) / 127.5) - 1)
                 img = img.permute(2, 0, 1)
             elif self.img_cache_dir is not None:
-                img = torch.load(os.path.join(self.img_cache_dir, self.images[idx].split('/')[-1] + '.pt'))
+                # Try .safetensors first (new format), fallback to .pt (old format)
+                img_name = self.images[idx].split('/')[-1]
+                safetensors_path = os.path.join(self.img_cache_dir, img_name + '.safetensors')
+                pt_path = os.path.join(self.img_cache_dir, img_name + '.pt')
+
+                if os.path.exists(safetensors_path):
+                    img_dict = load_embeddings_safetensors(safetensors_path)
+                    img = img_dict['latent']
+                else:
+                    img = torch.load(pt_path)
             else:
                 img = self.cached_image_embeddings[self.images[idx].split('/')[-1]]
             txt_path = self.images[idx].rsplit('.', 1)[0] + '.' + self.caption_type
@@ -103,12 +113,25 @@ class CustomImageDataset(Dataset):
                     return img, prompt
             elif self.txt_cache_dir is not None:
                 if throw_one(self.caption_dropout_rate):
-                    txt_path = os.path.join(self.txt_cache_dir, 'empty_embedding.pt')
-                    txt_embs = torch.load(txt_path)
+                    # Try .safetensors first (new format), fallback to .pt (old format)
+                    safetensors_path = os.path.join(self.txt_cache_dir, 'empty_embedding.safetensors')
+                    pt_path = os.path.join(self.txt_cache_dir, 'empty_embedding.pt')
+
+                    if os.path.exists(safetensors_path):
+                        txt_embs = load_embeddings_safetensors(safetensors_path)
+                    else:
+                        txt_embs = torch.load(pt_path)
                     return img, txt_embs['prompt_embeds'], txt_embs['prompt_embeds_mask']
                 else:
-                    txt_path = os.path.join(self.txt_cache_dir, txt_path.split('/')[-1] + '.pt')
-                    txt_embs = torch.load(txt_path)
+                    # Try .safetensors first (new format), fallback to .pt (old format)
+                    txt_name = txt_path.split('/')[-1]
+                    safetensors_path = os.path.join(self.txt_cache_dir, txt_name + '.safetensors')
+                    pt_path = os.path.join(self.txt_cache_dir, txt_name + '.pt')
+
+                    if os.path.exists(safetensors_path):
+                        txt_embs = load_embeddings_safetensors(safetensors_path)
+                    else:
+                        txt_embs = torch.load(pt_path)
 
                     return img, txt_embs['prompt_embeds'], txt_embs['prompt_embeds_mask']
             else:

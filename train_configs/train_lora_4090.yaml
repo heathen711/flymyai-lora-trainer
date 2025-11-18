@@ -36,3 +36,10 @@ save_cache_on_disk: true
 # FastSafeTensors configuration
 use_fastsafetensors: true
 fastsafetensors_num_threads: 8
+
+# Unified Memory Settings (DGX Spark)
+# Set unified_memory: true for Grace Hopper systems
+unified_memory: false
+disable_cpu_offload: false
+disable_quantization: false
+disable_gradient_checkpointing: false

@@ -239,6 +239,55 @@ If fastsafetensors is not installed, the utilities automatically fall back to st
 
 ---
 
+## 🚀 DGX Spark Unified Memory Support
+
+This project supports DGX Spark (Grace Hopper) unified memory architecture for optimal training performance.
+
+### Benefits
+
+- **Eliminates CPU-GPU memory transfers**: No need to move data between CPU and GPU
+- **No quantization required**: 128GB unified memory eliminates the need for model quantization
+- **Removes CPU offloading overhead**: Models stay on device for faster training
+- **Simplified memory management**: Automatic detection and configuration
+
+### Configuration
+
+For DGX Spark systems, use the dedicated config:
+
+```bash
+python train_4090.py --config train_configs/train_dgx_spark.yaml
+```
+
+Or enable unified memory in any config:
+
+```yaml
+unified_memory: true
+disable_cpu_offload: true
+disable_quantization: true
+```
+
+### Memory Monitoring
+
+Memory usage is automatically logged when `unified_memory: true`:
+
+```
+[before_training] Memory: Allocated=0.00GB, Reserved=0.00GB, Peak=0.00GB
+[step_500] Memory: Allocated=45.23GB, Reserved=48.00GB, Peak=52.10GB
+[step_1000] Memory: Allocated=45.23GB, Reserved=48.00GB, Peak=52.10GB
+```
+
+### How It Works
+
+The unified memory system:
+1. **Auto-detects** Grace Hopper architecture (compute capability 9.0+)
+2. **Configures** PyTorch memory allocator for unified memory
+3. **Disables** unnecessary optimizations (CPU offload, quantization)
+4. **Monitors** memory usage during training
+
+All training scripts (`train.py`, `train_4090.py`, `train_flux_lora.py`, `train_qwen_edit_lora.py`) support unified memory mode.
+
+---
+
 ## 📁 Data Preparation
 
 ### Dataset Structure for Training

@@ -40,6 +40,12 @@ from diffusers.loaders import AttnProcsLayers
 import gc
 from utils.cuda_utils import enable_tf32, supports_feature
 # FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
+from utils.unified_memory import (
+    is_unified_memory_system,
+    get_memory_config,
+    setup_unified_memory_env,
+)
+from utils.memory_monitor import log_memory_usage, reset_peak_memory_stats
 
 
 def parse_args():
@@ -89,6 +95,12 @@ def lora_processors(model):
 
 def main():
     args = OmegaConf.load(parse_args())
+
+    # Setup unified memory environment if applicable
+    if getattr(args, 'unified_memory', False):
+        setup_unified_memory_env()
+        logger.info("Unified memory mode enabled - disabling CPU offloading")
+
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -178,9 +190,12 @@ def main():
                 del prompt_embeds_mask
             else:
                 cached_text_embeddings['empty_embedding'] = {'prompt_embeds': prompt_embeds[0].to('cpu'), 'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')}
-                    
-        text_encoding_pipeline.to("cpu")
-        torch.cuda.empty_cache()
+
+        if not getattr(args, 'unified_memory', False):
+            text_encoding_pipeline.to("cpu")
+            torch.cuda.empty_cache()
+        else:
+            logger.info("Unified memory: keeping text encoding pipeline on device")
     del text_encoding_pipeline
     gc.collect()
 
@@ -217,14 +232,17 @@ def main():
                     del pixel_latents
                 else:
                     cached_image_embeddings[img_name] = pixel_latents
-        vae.to('cpu')
-        torch.cuda.empty_cache()
+        if not getattr(args, 'unified_memory', False):
+            vae.to('cpu')
+            torch.cuda.empty_cache()
+        else:
+            logger.info("Unified memory: keeping VAE on device")
     #del vae
     gc.collect()
     flux_transformer = QwenImageTransformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="transformer",    )
-    if args.quantize:
+    if args.quantize and not getattr(args, 'disable_quantization', False):
         torch_dtype = weight_dtype
         device = accelerator.device
         all_blocks = list(flux_transformer.transformer_blocks)
@@ -232,12 +250,16 @@ def main():
             block.to(device, dtype=torch_dtype)
             quantize(block, weights=qfloat8)
             freeze(block)
-            block.to('cpu')
+            if not getattr(args, 'unified_memory', False):
+                block.to('cpu')
         flux_transformer.to(device, dtype=torch_dtype)
         quantize(flux_transformer, weights=qfloat8)
         freeze(flux_transformer)
         #quantize(flux_transformer, weights=qint8, activations=qint8)
         #freeze(flux_transformer)
+    elif getattr(args, 'disable_quantization', False):
+        logger.info("Quantization disabled (unified memory mode)")
+        flux_transformer.to(accelerator.device, dtype=weight_dtype)
         
     lora_config = LoraConfig(
         r=args.rank,
@@ -330,6 +352,12 @@ def main():
         desc="Steps",
         disable=not accelerator.is_local_main_process,
     )
+
+    # Initialize memory monitoring for unified memory mode
+    if getattr(args, 'unified_memory', False):
+        reset_peak_memory_stats()
+        log_memory_usage("before_training")
+
     vae_scale_factor = 2 ** len(vae.temperal_downsample)
     for epoch in range(1):
         train_loss = 0.0
@@ -481,6 +509,10 @@ def main():
                     )
 
                     logger.info(f"Saved state to {save_path}")
+
+                    # Log memory usage after checkpointing in unified memory mode
+                    if getattr(args, 'unified_memory', False):
+                        log_memory_usage(f"step_{global_step}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)

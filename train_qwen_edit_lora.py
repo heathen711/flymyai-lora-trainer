@@ -42,6 +42,11 @@ import gc
 import math
 from utils.cuda_utils import enable_tf32, supports_feature
 # FastSafeTensors utilities available in utils.fast_loading for checkpoint operations
+from utils.unified_memory import (
+    is_unified_memory_system,
+    get_memory_config,
+    setup_unified_memory_env,
+)
 
 
 def parse_args():
@@ -100,6 +105,11 @@ def calculate_dimensions(target_area, ratio):
 
 def main():
     args = OmegaConf.load(parse_args())
+
+    # Setup unified memory environment if configured
+    if getattr(args, 'unified_memory', False):
+        setup_unified_memory_env()
+
     args.save_cache_on_disk = False
     args.precompute_text_embeddings = True
     args.precompute_image_embeddings = True

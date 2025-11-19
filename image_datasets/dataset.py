@@ -103,7 +103,8 @@ class CustomImageDataset(Dataset):
                 else:
                     img = torch.load(pt_path)
             else:
-                img = self.cached_image_embeddings[self.images[idx].split('/')[-1]]
+                # Clone to ensure resizable storage for DataLoader batching
+                img = self.cached_image_embeddings[self.images[idx].split('/')[-1]].clone()
             txt_path = self.images[idx].rsplit('.', 1)[0] + '.' + self.caption_type
             if self.cached_text_embeddings is None and self.txt_cache_dir is None:
                 prompt = open(txt_path, encoding='utf-8').read()
@@ -135,11 +136,12 @@ class CustomImageDataset(Dataset):
 
                     return img, txt_embs['prompt_embeds'], txt_embs['prompt_embeds_mask']
             else:
+                # Clone cached embeddings to ensure resizable storage for DataLoader batching
                 txt = txt_path.split('/')[-1]
                 if throw_one(self.caption_dropout_rate):
-                    return img, self.cached_text_embeddings['empty_embedding']['prompt_embeds'], self.cached_text_embeddings['empty_embedding']['prompt_embeds_mask']
+                    return img, self.cached_text_embeddings['empty_embedding']['prompt_embeds'].clone(), self.cached_text_embeddings['empty_embedding']['prompt_embeds_mask'].clone()
                 else:
-                    return img, self.cached_text_embeddings[txt]['prompt_embeds'], self.cached_text_embeddings[txt]['prompt_embeds_mask']
+                    return img, self.cached_text_embeddings[txt]['prompt_embeds'].clone(), self.cached_text_embeddings[txt]['prompt_embeds_mask'].clone()
         except Exception as e:
             print(e)
             return self.__getitem__(random.randint(0, len(self.images) - 1))

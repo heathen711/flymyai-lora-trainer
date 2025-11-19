@@ -26,13 +26,14 @@ import torch
 
 # CRITICAL: Disable Flash Attention immediately after importing torch
 # Flash Attention 3 is unstable on ARM64 + sm_121 (see CLAUDE.md)
+# Memory-efficient SDPA also triggers FA sm80 kernels (incompatible with sm_121)
 # Must be set before any model loading
 torch.backends.cuda.enable_flash_sdp(False)  # Disable Flash Attention
 torch.backends.cuda.enable_math_sdp(True)    # Enable math fallback
-torch.backends.cuda.enable_mem_efficient_sdp(True)  # Enable memory-efficient attention
+torch.backends.cuda.enable_mem_efficient_sdp(False)  # DISABLE - triggers FA sm80 kernels on sm_121
 try:
     # cuDNN backend is only available on newer PyTorch versions
-    torch.backends.cuda.enable_cudnn_sdp(True)  # Enable cuDNN SDPA
+    torch.backends.cuda.enable_cudnn_sdp(True)  # Enable cuDNN SDPA (stable on ARM64)
 except AttributeError:
     pass  # Older PyTorch version
 from accelerate import Accelerator
@@ -594,8 +595,9 @@ def main():
         logger.warning(f"  cuDNN SDPA:          {'ENABLED' if torch.backends.cuda.cudnn_sdp_enabled() else 'DISABLED'}")
     except AttributeError:
         logger.warning(f"  cuDNN SDPA:          NOT AVAILABLE (PyTorch version)")
-    logger.warning("  → Flash Attention 3 is DISABLED (unstable on ARM64 + sm_121)")
-    logger.warning("  → Using cuDNN/Memory-Efficient backends instead")
+    logger.warning("  → Flash Attention is DISABLED (unstable on ARM64 + sm_121)")
+    logger.warning("  → Memory-Efficient SDPA DISABLED (triggers FA sm80 kernels on sm_121)")
+    logger.warning("  → Using cuDNN SDPA + Math fallback backends only")
     logger.warning("=" * 80)
 
     # Step 4: Initialize memory monitor

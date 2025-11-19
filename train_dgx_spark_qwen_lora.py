@@ -757,20 +757,20 @@ def main():
     early_logger.info("Unified memory environment configured")
 
     # Step 3.5: Log Flash Attention status
-    logger.warning("=" * 80)
-    logger.warning("ATTENTION BACKEND CONFIGURATION")
-    logger.warning("=" * 80)
-    logger.warning(f"  Flash SDPA:          {'ENABLED' if torch.backends.cuda.flash_sdp_enabled() else 'DISABLED'}")
-    logger.warning(f"  Memory-Efficient:    {'ENABLED' if torch.backends.cuda.mem_efficient_sdp_enabled() else 'DISABLED'}")
-    logger.warning(f"  Math SDPA:           {'ENABLED' if torch.backends.cuda.math_sdp_enabled() else 'DISABLED'}")
+    early_logger.warning("=" * 80)
+    early_logger.warning("ATTENTION BACKEND CONFIGURATION")
+    early_logger.warning("=" * 80)
+    early_logger.warning(f"  Flash SDPA:          {'ENABLED' if torch.backends.cuda.flash_sdp_enabled() else 'DISABLED'}")
+    early_logger.warning(f"  Memory-Efficient:    {'ENABLED' if torch.backends.cuda.mem_efficient_sdp_enabled() else 'DISABLED'}")
+    early_logger.warning(f"  Math SDPA:           {'ENABLED' if torch.backends.cuda.math_sdp_enabled() else 'DISABLED'}")
     try:
-        logger.warning(f"  cuDNN SDPA:          {'ENABLED' if torch.backends.cuda.cudnn_sdp_enabled() else 'DISABLED'}")
+        early_logger.warning(f"  cuDNN SDPA:          {'ENABLED' if torch.backends.cuda.cudnn_sdp_enabled() else 'DISABLED'}")
     except AttributeError:
-        logger.warning(f"  cuDNN SDPA:          NOT AVAILABLE (PyTorch version)")
-    logger.warning("  → Flash Attention is DISABLED (unstable on ARM64 + sm_121)")
-    logger.warning("  → Memory-Efficient SDPA DISABLED (triggers FA sm80 kernels on sm_121)")
-    logger.warning("  → Using cuDNN SDPA + Math fallback backends only")
-    logger.warning("=" * 80)
+        early_logger.warning(f"  cuDNN SDPA:          NOT AVAILABLE (PyTorch version)")
+    early_logger.warning("  → Flash Attention is DISABLED (unstable on ARM64 + sm_121)")
+    early_logger.warning("  → Memory-Efficient SDPA DISABLED (triggers FA sm80 kernels on sm_121)")
+    early_logger.warning("  → Using cuDNN SDPA + Math fallback backends only")
+    early_logger.warning("=" * 80)
 
     # Step 4: Initialize memory monitor
     memory_monitor = DGXSparkMemoryMonitor(

@@ -78,11 +78,33 @@ def custom_collate_fn(batch):
         else:
             imgs = torch.stack(imgs, dim=0)
 
-        # Stack text embeddings and masks
-        text_embeds = torch.stack(text_embeds, dim=0)
-        text_masks = torch.stack(text_masks, dim=0)
+        # Handle variable-length text embeddings by padding to max sequence length
+        max_seq_len = max(embed.shape[0] for embed in text_embeds)
 
-        return imgs, text_embeds, text_masks
+        padded_text_embeds = []
+        padded_text_masks = []
+        for embed, mask in zip(text_embeds, text_masks):
+            seq_len = embed.shape[0]
+            pad_len = max_seq_len - seq_len
+            if pad_len > 0:
+                # Pad text embedding: [seq_len, hidden_dim] -> [max_seq_len, hidden_dim]
+                padded_embed = F.pad(embed, (0, 0, 0, pad_len), mode='constant', value=0)
+                # Pad attention mask: [seq_len] -> [max_seq_len] (0 for padded positions)
+                padded_mask = F.pad(mask, (0, pad_len), mode='constant', value=0)
+            else:
+                padded_embed = embed
+                padded_mask = mask
+            padded_text_embeds.append(padded_embed)
+            padded_text_masks.append(padded_mask)
+
+        text_embeds = torch.stack(padded_text_embeds, dim=0)
+        text_masks = torch.stack(padded_text_masks, dim=0)
+
+        return {
+            "latents": imgs,
+            "prompt_embeds": text_embeds,
+            "prompt_embeds_mask": text_masks
+        }
 
     else:
         raise ValueError(f"Unexpected batch format with {len(batch[0])} elements")
@@ -147,7 +169,7 @@ class CustomImageDataset(Dataset):
         self.txt_cache_dir = txt_cache_dir
         self.img_cache_dir = img_cache_dir
         print('cached_text_embeddings', type(cached_text_embeddings))
-        
+
     def __len__(self):
         return 999999
 

@@ -99,15 +99,15 @@ DGX_SPARK_OVERRIDES = {
     "disable_cpu_offload": True,
     "pin_memory": False,
     "disable_quantization": True,
-    "disable_gradient_checkpointing": True,
+    "disable_gradient_checkpointing": False,  # Must enable - forward pass needs ~46GB for activations
 
     # Precision
     "quantize": False,
     "adam8bit": False,
     "mixed_precision": "bf16",
 
-    # Data Loading - Keep embeddings in unified memory for best performance
-    "save_cache_on_disk": False,
+    # Data Loading - Save embeddings to disk and load on demand per step
+    "save_cache_on_disk": True,
 
     # CUDA 13.0 Features
     "cuda_13_features": {
@@ -195,11 +195,12 @@ def override_config_for_dgx_spark(user_config):
             early_logger.info(f"  data_config.train_batch_size: {old_bs} → {QWEN_LORA_BATCH_SIZE}")
         final_config.data_config.train_batch_size = QWEN_LORA_BATCH_SIZE
 
-        # Override num_workers
+        # Override num_workers - use 0 since embeddings are cached on disk
+        # Main thread can handle feeding cached latents without parallel workers
         old_workers = getattr(final_config.data_config, "num_workers", None)
-        if old_workers != 4:
-            early_logger.info(f"  data_config.num_workers: {old_workers} → 4")
-        final_config.data_config.num_workers = 4
+        if old_workers != 0:
+            early_logger.info(f"  data_config.num_workers: {old_workers} → 0")
+        final_config.data_config.num_workers = 0
 
     early_logger.warning("=" * 80)
 
@@ -297,13 +298,17 @@ def load_models_for_dgx_spark(args, weight_dtype, device):
     transformer.to(device)
     logger.info("  ✓ Transformer loaded to unified memory")
 
-    # Disable gradient checkpointing (abundant memory on DGX Spark)
-    if hasattr(transformer, 'disable_gradient_checkpointing'):
-        transformer.disable_gradient_checkpointing()
-        logger.info("  ✓ Gradient checkpointing disabled (abundant memory)")
-    elif hasattr(transformer, '_set_gradient_checkpointing'):
-        transformer._set_gradient_checkpointing(value=False)
-        logger.info("  ✓ Gradient checkpointing disabled via _set_gradient_checkpointing")
+    # Configure gradient checkpointing based on config
+    if getattr(args, 'disable_gradient_checkpointing', False):
+        if hasattr(transformer, 'disable_gradient_checkpointing'):
+            transformer.disable_gradient_checkpointing()
+            logger.info("  ✓ Gradient checkpointing disabled (abundant memory)")
+        elif hasattr(transformer, '_set_gradient_checkpointing'):
+            transformer._set_gradient_checkpointing(value=False)
+            logger.info("  ✓ Gradient checkpointing disabled via _set_gradient_checkpointing")
+    else:
+        transformer.enable_gradient_checkpointing()
+        logger.info("  ✓ Gradient checkpointing enabled (saves ~46GB activations)")
 
     # Configure LoRA
     lora_config = LoraConfig(
@@ -370,6 +375,28 @@ def precompute_embeddings(args, text_encoding_pipeline, vae, weight_dtype, accel
 
             # Process all text files
             txt_files = [i for i in os.listdir(args.data_config.img_dir) if ".txt" in i]
+
+            # Warmup call to compile CUDA kernels (first call is slow on sm_121)
+            logger.info("  Warming up text encoder...")
+            logger.info(f"    Pipeline device: {text_encoding_pipeline.device}")
+            logger.info(f"    Text encoder device: {text_encoding_pipeline.text_encoder.device}")
+            import sys
+            sys.stdout.flush()
+            sys.stderr.flush()
+
+            logger.info("    Calling encode_prompt...")
+            sys.stdout.flush()
+            sys.stderr.flush()
+
+            _ = text_encoding_pipeline.encode_prompt(
+                prompt=["warmup"],
+                device=text_encoding_pipeline.device,
+                num_images_per_prompt=1,
+                max_sequence_length=1024,
+            )
+            torch.cuda.synchronize()
+            logger.info("  ✓ Text encoder ready")
+
             for txt in tqdm(txt_files, desc="Encoding text"):
                 txt_path = os.path.join(args.data_config.img_dir, txt)
                 prompt = open(txt_path, encoding="utf-8").read()
@@ -464,9 +491,8 @@ def setup_dataloader_for_dgx_spark(args, cached_text_embeddings, txt_cache_dir,
     Setup DataLoader optimized for DGX Spark unified memory.
 
     - pin_memory=False (not needed for unified memory)
-    - num_workers=4 (lower than discrete GPU)
-    - prefetch_factor=4 (moderate prefetch)
-    - Embeddings cached in unified memory or on NVMe
+    - num_workers=0 (main thread handles cached latents)
+    - Embeddings cached on disk and loaded on demand
 
     Args:
         args: Training configuration
@@ -542,6 +568,9 @@ def train_loop(
 
     logger.info("Starting DGX Spark optimized training loop...")
 
+    # VAE scale factor for unpacking latents
+    vae_scale_factor = 2 ** len(vae.temperal_downsample)
+
     # Prepare optimizer (full precision Adam, no 8-bit)
     params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
 
@@ -607,10 +636,23 @@ def train_loop(
         transformer.train()
 
         for step, batch in enumerate(train_dataloader):
+            if step == 0:
+                logger.info("  Got first batch from DataLoader")
+                import sys
+                sys.stdout.flush()
+                sys.stderr.flush()
+
             with accelerator.accumulate(transformer):
                 # Get latents and prompts from batch
+                if step == 0:
+                    logger.info("  Processing first batch...")
+                    sys.stdout.flush()
                 latents = batch["latents"].to(weight_dtype)
                 prompt_embeds = batch["prompt_embeds"].to(weight_dtype)
+                prompt_embeds_mask = batch["prompt_embeds_mask"].to(latents.device)
+
+                # Permute latents from [B, C, T, H, W] to [B, T, C, H, W] for transformer
+                latents = latents.permute(0, 2, 1, 3, 4)
 
                 # Normalize VAE latents (CRITICAL: required for correct training)
                 latents_mean = (
@@ -630,19 +672,56 @@ def train_loop(
                 # Sample timesteps
                 u = torch.rand(bsz, device=latents.device)
                 indices = (u * noise_scheduler.config.num_train_timesteps).long()
-                timesteps = noise_scheduler.timesteps[indices].to(device=latents.device)
+                timesteps = noise_scheduler.timesteps[indices.cpu()].to(device=latents.device)
 
                 # Add noise to latents
                 sigmas = _get_sigmas(noise_scheduler, timesteps, len(latents.shape), latents.dtype)
                 noisy_latents = sigmas * noise + (1.0 - sigmas) * latents
 
+                # Pack latents for transformer input
+                packed_noisy_latents = QwenImagePipeline._pack_latents(
+                    noisy_latents,
+                    bsz,
+                    noisy_latents.shape[2],
+                    noisy_latents.shape[3],
+                    noisy_latents.shape[4],
+                )
+
+                # Calculate image shapes and text sequence lengths for RoPE
+                img_shapes = [(1, noisy_latents.shape[3] // 2, noisy_latents.shape[4] // 2)] * bsz
+                txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+
                 # Predict noise
+                if step == 0:
+                    import sys
+                    logger.info("  Running transformer forward pass...")
+                    logger.info(f"    packed_noisy_latents: {packed_noisy_latents.device}, {packed_noisy_latents.shape}")
+                    logger.info(f"    timesteps: {timesteps.device}, {timesteps.shape}")
+                    logger.info(f"    prompt_embeds: {prompt_embeds.device}, {prompt_embeds.shape}")
+                    logger.info(f"    prompt_embeds_mask: {prompt_embeds_mask.device}, {prompt_embeds_mask.shape}")
+                    logger.info(f"    transformer device: {next(transformer.parameters()).device}")
+                    sys.stdout.flush()
+                    sys.stderr.flush()
                 model_pred = transformer(
-                    hidden_states=noisy_latents,
+                    hidden_states=packed_noisy_latents,
                     timestep=timesteps,
                     encoder_hidden_states=prompt_embeds,
+                    encoder_hidden_states_mask=prompt_embeds_mask,
+                    img_shapes=img_shapes,
+                    txt_seq_lens=txt_seq_lens,
                     return_dict=False,
                 )[0]
+                if step == 0:
+                    logger.info("  Forward pass complete, unpacking...")
+                    sys.stdout.flush()
+
+                # Unpack model prediction to match target shape
+                model_pred = QwenImagePipeline._unpack_latents(
+                    model_pred,
+                    height=noisy_latents.shape[3] * vae_scale_factor,
+                    width=noisy_latents.shape[4] * vae_scale_factor,
+                    vae_scale_factor=vae_scale_factor,
+                )
 
                 # Compute loss
                 weighting = compute_loss_weighting_for_sd3(
@@ -655,9 +734,15 @@ def train_loop(
                     dim=1,
                 )
                 loss = loss.mean()
+                if step == 0:
+                    logger.info(f"  Loss computed: {loss.item():.4f}, running backward...")
+                    sys.stdout.flush()
 
                 # Backward pass
                 accelerator.backward(loss)
+                if step == 0:
+                    logger.info("  Backward pass complete")
+                    sys.stdout.flush()
 
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)

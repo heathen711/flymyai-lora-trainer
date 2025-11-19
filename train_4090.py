@@ -381,8 +381,10 @@ def main():
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(flux_transformer):
                 if args.precompute_text_embeddings:
-                    img, prompt_embeds, prompt_embeds_mask = batch
-                    prompt_embeds, prompt_embeds_mask = prompt_embeds.to(dtype=weight_dtype).to(accelerator.device), prompt_embeds_mask.to(dtype=torch.int32).to(accelerator.device)
+                    # Batch is a dictionary from custom_collate_fn
+                    img = batch["latents"]
+                    prompt_embeds = batch["prompt_embeds"].to(dtype=weight_dtype).to(accelerator.device)
+                    prompt_embeds_mask = batch["prompt_embeds_mask"].to(dtype=torch.int32).to(accelerator.device)
                 else:
                     img, prompts = batch
                 with torch.no_grad():
@@ -416,7 +418,7 @@ def main():
                         mode_scale=1.29,
                     )
                     indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
-                    timesteps = noise_scheduler_copy.timesteps[indices].to(device=pixel_latents.device)
+                    timesteps = noise_scheduler_copy.timesteps[indices.cpu()].to(device=pixel_latents.device)
 
                 sigmas = get_sigmas(timesteps, n_dim=pixel_latents.ndim, dtype=pixel_latents.dtype)
                 noisy_model_input = (1.0 - sigmas) * pixel_latents + sigmas * noise

@@ -1,0 +1,78 @@
+# train_configs/train_dgx_spark_qwen_lora_rebecka.yaml
+# DGX Spark optimized Qwen-Image LoRA training - REBECKA DATASET
+# Person/character LoRA for R3b3ck4 with 133 training images
+# Optimized for learning facial features, poses, clothing, body details
+# Settings will be overridden by train_dgx_spark_qwen_lora.py
+
+pretrained_model_name_or_path: "Qwen/Qwen-Image"
+output_dir: "output/dgx_spark_qwen_lora_rebecka"
+logging_dir: "logs/rebecka"
+
+resume_from_checkpoint: null
+
+# Training hyperparameters - Person focus with larger dataset
+# 133 images allows for more aggressive training
+# Higher rank for detailed features (face, body, clothing, poses)
+# Moderate learning rate for stable convergence
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"
+report_to: "tensorboard"
+learning_rate: 2.5e-4  # Slightly higher than default person config (133 images provide stability)
+max_train_steps: 6000  # More steps for comprehensive feature learning
+checkpointing_steps: 300
+checkpoints_total_limit: 10
+seed: 42
+
+# Optimizer settings
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# Learning rate schedule
+lr_scheduler: cosine_with_restarts  # Cosine for smooth convergence
+lr_warmup_steps: 150  # Longer warmup for 133-image dataset
+
+# LoRA configuration - High rank for detailed person features
+rank: 32  # Higher rank for facial features, body details, clothing, expressions
+
+# Data configuration - Rebecka dataset
+data_config:
+  img_dir: "dataset/rebecka"
+  img_size: 1024
+  train_batch_size: 4  # Will be overridden by script
+  num_workers: 4  # Will be overridden by script
+  caption_dropout_rate: 0.05  # Low dropout - captions critical for trigger word consistency
+  random_ratio: false
+  caption_type: txt
+
+# Embedding cache
+precompute_text_embeddings: true
+precompute_image_embeddings: true
+save_cache_on_disk: true
+
+# Dataset details:
+# - 133 high quality images with captions
+# - Trigger word: "R3b3ck4"
+# - Content: Person/character focus with NSFW content
+# - Caption format: "R3b3ck4 [pose], [clothing], [background/context]"
+# - Good variety of angles, poses, clothing, and lighting
+#
+# Training recommendations:
+# - Use trigger word "R3b3ck4" consistently in prompts
+# - Dataset has strong variety (133 images) - can handle higher learning rate
+# - Example prompt: "R3b3ck4, wearing black dress, standing pose, indoor setting"
+# - Monitor training loss - should converge smoothly with this dataset size
+# - Consider testing at steps 1500, 3000, 4500, 6000 to find optimal checkpoint
+
+# Note: The following settings are overridden by train_dgx_spark_qwen_lora.py
+# unified_memory: true
+# disable_cpu_offload: true
+# pin_memory: false
+# disable_quantization: true
+# quantize: false
+# adam8bit: false
+# cuda_13_features.enable_flash_attention_3: false
+# cuda_13_features.enable_cudnn_sdp: true
+# cuda_13_features.enable_tf32_compute: true

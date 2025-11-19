@@ -7,9 +7,85 @@ from torch.utils.data import Dataset, DataLoader
 import json
 import random
 from utils.fast_loading import load_embeddings_safetensors
+import torch.nn.functional as F
 
 def throw_one(probability: float) -> int:
     return 1 if random.random() < probability else 0
+
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function to handle variable-sized image latents.
+
+    When using precomputed embeddings, images may have different aspect ratios,
+    resulting in latents with different spatial dimensions. This function pads
+    them to the maximum dimensions in the batch.
+
+    Args:
+        batch: List of tuples (img_latent, text_embed, text_mask) or (img, prompt)
+
+    Returns:
+        Batched tensors with padding applied to image latents
+    """
+    if len(batch[0]) == 2:
+        # Non-embedded case: (img, prompt)
+        imgs, prompts = zip(*batch)
+        # Check if imgs are tensors (latents) or need processing
+        if torch.is_tensor(imgs[0]):
+            # Handle variable-sized latents
+            if len(imgs[0].shape) == 4:  # [C, T, H, W] format
+                # Find max dimensions
+                max_h = max(img.shape[2] for img in imgs)
+                max_w = max(img.shape[3] for img in imgs)
+
+                # Pad each latent to max dimensions
+                padded_imgs = []
+                for img in imgs:
+                    c, t, h, w = img.shape
+                    pad_h = max_h - h
+                    pad_w = max_w - w
+                    # Pad: (left, right, top, bottom)
+                    padded = F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0)
+                    padded_imgs.append(padded)
+
+                imgs = torch.stack(padded_imgs, dim=0)
+            else:
+                imgs = torch.stack(imgs, dim=0)
+
+        return imgs, prompts
+
+    elif len(batch[0]) == 3:
+        # Embedded case: (img_latent, text_embed, text_mask)
+        imgs, text_embeds, text_masks = zip(*batch)
+
+        # Handle variable-sized image latents
+        if len(imgs[0].shape) == 4:  # [C, T, H, W] format
+            # Find max dimensions
+            max_h = max(img.shape[2] for img in imgs)
+            max_w = max(img.shape[3] for img in imgs)
+
+            # Pad each latent to max dimensions
+            padded_imgs = []
+            for img in imgs:
+                c, t, h, w = img.shape
+                pad_h = max_h - h
+                pad_w = max_w - w
+                # Pad: (left, right, top, bottom)
+                padded = F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0)
+                padded_imgs.append(padded)
+
+            imgs = torch.stack(padded_imgs, dim=0)
+        else:
+            imgs = torch.stack(imgs, dim=0)
+
+        # Stack text embeddings and masks
+        text_embeds = torch.stack(text_embeds, dim=0)
+        text_masks = torch.stack(text_masks, dim=0)
+
+        return imgs, text_embeds, text_masks
+
+    else:
+        raise ValueError(f"Unexpected batch format with {len(batch[0])} elements")
 
 
 def image_resize(img, max_size=512):
@@ -165,5 +241,6 @@ def loader(train_batch_size, num_workers, pin_memory=True, **args):
         batch_size=train_batch_size,
         num_workers=num_workers,
         shuffle=True,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        collate_fn=custom_collate_fn  # Use custom collate to handle variable-sized latents
     )

@@ -18,15 +18,18 @@ Date: 2025-11-18
 
 import argparse
 import copy
+import gc
 import logging
 import os
 import sys
 
+import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration
 from omegaconf import OmegaConf
+from PIL import Image
 from tqdm.auto import tqdm
 
 # Core imports
@@ -49,12 +52,21 @@ from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 
 # Local utilities
-from image_datasets.dataset import loader
+from image_datasets.dataset import loader, image_resize
 from utils.cuda_utils import enable_tf32, supports_feature, get_optimal_settings
+from utils.fast_loading import save_embeddings_safetensors
 from utils.unified_memory import setup_unified_memory_env
 from utils.memory_monitor import log_memory_usage, reset_peak_memory_stats, get_memory_stats
 
-logger = get_logger(__name__, log_level="INFO")
+# Use standard logging for early validation (before Accelerator init)
+# Will switch to accelerate logger after Accelerator is initialized
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+    level=logging.INFO,
+)
+early_logger = logging.getLogger(__name__)
+logger = None  # Will be initialized after Accelerator
 
 # ============================================================================
 # DGX SPARK HARD-CODED SETTINGS
@@ -81,8 +93,8 @@ DGX_SPARK_OVERRIDES = {
     "adam8bit": False,
     "mixed_precision": "bf16",
 
-    # Data Loading
-    "save_cache_on_disk": True,
+    # Data Loading - Keep embeddings in unified memory for best performance
+    "save_cache_on_disk": False,
 
     # CUDA 13.0 Features
     "cuda_13_features": {
@@ -125,10 +137,10 @@ def validate_dgx_spark():
             f"This may not be a DGX Spark system."
         )
 
-    logger.info("✓ DGX Spark validation passed")
-    logger.info(f"  GPU: sm_121 (Blackwell GB10)")
-    logger.info(f"  Memory: {total_memory / 1e9:.1f}GB unified")
-    logger.info(f"  CUDA: {torch.version.cuda}")
+    early_logger.info("✓ DGX Spark validation passed")
+    early_logger.info(f"  GPU: sm_121 (Blackwell GB10)")
+    early_logger.info(f"  Memory: {total_memory / 1e9:.1f}GB unified")
+    early_logger.info(f"  CUDA: {torch.version.cuda}")
 
 # ============================================================================
 # CONFIG OVERRIDE
@@ -139,9 +151,9 @@ def override_config_for_dgx_spark(user_config):
     Override user config with DGX Spark optimal settings.
     Log all changes verbosely.
     """
-    logger.warning("=" * 80)
-    logger.warning("DGX SPARK MODE: Overriding config for maximum performance")
-    logger.warning("=" * 80)
+    early_logger.warning("=" * 80)
+    early_logger.warning("DGX SPARK MODE: Overriding config for maximum performance")
+    early_logger.warning("=" * 80)
 
     # Deep copy to avoid modifying original
     final_config = OmegaConf.create(user_config)
@@ -155,28 +167,28 @@ def override_config_for_dgx_spark(user_config):
             for sub_key, sub_value in value.items():
                 old_value = getattr(final_config.cuda_13_features, sub_key, None)
                 if old_value != sub_value:
-                    logger.info(f"  cuda_13_features.{sub_key}: {old_value} → {sub_value}")
+                    early_logger.info(f"  cuda_13_features.{sub_key}: {old_value} → {sub_value}")
                 setattr(final_config.cuda_13_features, sub_key, sub_value)
         else:
             old_value = getattr(final_config, key, None)
             if old_value != value:
-                logger.info(f"  {key}: {old_value} → {value}")
+                early_logger.info(f"  {key}: {old_value} → {value}")
             setattr(final_config, key, value)
 
     # Override batch size in data_config
     if hasattr(final_config, "data_config"):
         old_bs = getattr(final_config.data_config, "train_batch_size", None)
         if old_bs != QWEN_LORA_BATCH_SIZE:
-            logger.info(f"  data_config.train_batch_size: {old_bs} → {QWEN_LORA_BATCH_SIZE}")
+            early_logger.info(f"  data_config.train_batch_size: {old_bs} → {QWEN_LORA_BATCH_SIZE}")
         final_config.data_config.train_batch_size = QWEN_LORA_BATCH_SIZE
 
         # Override num_workers
         old_workers = getattr(final_config.data_config, "num_workers", None)
         if old_workers != 4:
-            logger.info(f"  data_config.num_workers: {old_workers} → 4")
+            early_logger.info(f"  data_config.num_workers: {old_workers} → 4")
         final_config.data_config.num_workers = 4
 
-    logger.warning("=" * 80)
+    early_logger.warning("=" * 80)
 
     return final_config
 
@@ -187,9 +199,10 @@ def override_config_for_dgx_spark(user_config):
 class DGXSparkMemoryMonitor:
     """Memory monitoring for DGX Spark unified memory."""
 
-    def __init__(self, safe_limit_gb=115, warning_threshold_gb=103.5):
+    def __init__(self, safe_limit_gb=115, warning_threshold_gb=103.5, logger_instance=None):
         self.safe_limit_bytes = safe_limit_gb * 1e9
         self.warning_threshold_bytes = warning_threshold_gb * 1e9
+        self.logger = logger_instance  # Store logger instance
 
     def check_memory_pressure(self, step, allocated_bytes=None):
         """
@@ -215,10 +228,14 @@ class DGXSparkMemoryMonitor:
         # Warning: approaching limit
         if allocated_bytes > self.warning_threshold_bytes:
             usage_pct = (allocated_bytes / self.safe_limit_bytes) * 100
-            logger.warning(
+            warning_msg = (
                 f"[Step {step}] Memory pressure high: {allocated_gb:.1f}GB / {self.safe_limit_bytes/1e9:.0f}GB "
                 f"({usage_pct:.1f}%)"
             )
+            if self.logger is not None:
+                self.logger.warning(warning_msg)
+            else:
+                early_logger.warning(warning_msg)
 
 # ============================================================================
 # MODEL LOADING
@@ -267,6 +284,14 @@ def load_models_for_dgx_spark(args, weight_dtype, device):
     transformer.to(device)
     logger.info("  ✓ Transformer loaded to unified memory")
 
+    # Disable gradient checkpointing (abundant memory on DGX Spark)
+    if hasattr(transformer, 'disable_gradient_checkpointing'):
+        transformer.disable_gradient_checkpointing()
+        logger.info("  ✓ Gradient checkpointing disabled (abundant memory)")
+    elif hasattr(transformer, '_set_gradient_checkpointing'):
+        transformer._set_gradient_checkpointing(value=False)
+        logger.info("  ✓ Gradient checkpointing disabled via _set_gradient_checkpointing")
+
     # Configure LoRA
     lora_config = LoraConfig(
         r=args.rank,
@@ -291,24 +316,151 @@ def load_models_for_dgx_spark(args, weight_dtype, device):
     return text_encoding_pipeline, vae, transformer, noise_scheduler, lora_config
 
 # ============================================================================
+# EMBEDDING PRECOMPUTATION
+# ============================================================================
+
+def precompute_embeddings(args, text_encoding_pipeline, vae, weight_dtype, accelerator):
+    """
+    Precompute text and image embeddings for faster training.
+
+    For DGX Spark with unified memory and save_cache_on_disk=False,
+    embeddings are kept in unified memory for best performance.
+
+    Args:
+        args: Training configuration
+        text_encoding_pipeline: Text encoding pipeline
+        vae: VAE model
+        weight_dtype: torch.bfloat16
+        accelerator: Accelerate Accelerator
+
+    Returns:
+        cached_text_embeddings, txt_cache_dir, cached_image_embeddings, img_cache_dir
+    """
+    cached_text_embeddings = None
+    txt_cache_dir = None
+    cached_image_embeddings = None
+    img_cache_dir = None
+
+    cache_dir = os.path.join(args.output_dir, "cache")
+
+    # Precompute text embeddings
+    if args.precompute_text_embeddings:
+        logger.info("Precomputing text embeddings...")
+        with torch.no_grad():
+            if args.save_cache_on_disk:
+                txt_cache_dir = os.path.join(cache_dir, "text_embs")
+                os.makedirs(txt_cache_dir, exist_ok=True)
+                logger.info(f"  Saving text embeddings to: {txt_cache_dir}")
+            else:
+                cached_text_embeddings = {}
+                logger.info("  Keeping text embeddings in unified memory")
+
+            # Process all text files
+            txt_files = [i for i in os.listdir(args.data_config.img_dir) if ".txt" in i]
+            for txt in tqdm(txt_files, desc="Encoding text"):
+                txt_path = os.path.join(args.data_config.img_dir, txt)
+                prompt = open(txt_path, encoding="utf-8").read()
+                prompt_embeds, prompt_embeds_mask = text_encoding_pipeline.encode_prompt(
+                    prompt=[prompt],
+                    device=text_encoding_pipeline.device,
+                    num_images_per_prompt=1,
+                    max_sequence_length=1024,
+                )
+                if args.save_cache_on_disk:
+                    save_embeddings_safetensors(
+                        {'prompt_embeds': prompt_embeds[0].to('cpu'), 'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')},
+                        os.path.join(txt_cache_dir, txt + '.safetensors')
+                    )
+                else:
+                    cached_text_embeddings[txt] = {
+                        'prompt_embeds': prompt_embeds[0].to('cpu'),
+                        'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')
+                    }
+
+            # Compute empty embedding for caption dropout
+            prompt_embeds, prompt_embeds_mask = text_encoding_pipeline.encode_prompt(
+                prompt=[' '],
+                device=text_encoding_pipeline.device,
+                num_images_per_prompt=1,
+                max_sequence_length=1024,
+            )
+            if args.save_cache_on_disk:
+                save_embeddings_safetensors(
+                    {'prompt_embeds': prompt_embeds[0].to('cpu'), 'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')},
+                    os.path.join(txt_cache_dir, 'empty_embedding.safetensors')
+                )
+                del prompt_embeds
+                del prompt_embeds_mask
+            else:
+                cached_text_embeddings['empty_embedding'] = {
+                    'prompt_embeds': prompt_embeds[0].to('cpu'),
+                    'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')
+                }
+
+        logger.info(f"✓ Precomputed {len(txt_files)} text embeddings")
+        log_memory_usage("after_text_embedding_precomputation")
+
+    # Precompute image embeddings
+    if args.precompute_image_embeddings:
+        logger.info("Precomputing image embeddings...")
+        if args.save_cache_on_disk:
+            img_cache_dir = os.path.join(cache_dir, "img_embs")
+            os.makedirs(img_cache_dir, exist_ok=True)
+            logger.info(f"  Saving image embeddings to: {img_cache_dir}")
+        else:
+            cached_image_embeddings = {}
+            logger.info("  Keeping image embeddings in unified memory")
+
+        with torch.no_grad():
+            img_files = [i for i in os.listdir(args.data_config.img_dir)
+                        if ".png" in i or ".jpg" in i or ".jpeg" in i or ".JPG" in i or ".PNG" in i]
+            for img_name in tqdm(img_files, desc="Encoding images"):
+                img = Image.open(os.path.join(args.data_config.img_dir, img_name)).convert('RGB')
+                img = image_resize(img, args.data_config.img_size)
+                w, h = img.size
+                new_w = (w // 32) * 32
+                new_h = (h // 32) * 32
+                img = img.resize((new_w, new_h))
+                img = torch.from_numpy((np.array(img) / 127.5) - 1)
+                img = img.permute(2, 0, 1).unsqueeze(0)
+                pixel_values = img.unsqueeze(2)
+                pixel_values = pixel_values.to(dtype=weight_dtype).to(accelerator.device)
+
+                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]
+                if args.save_cache_on_disk:
+                    save_embeddings_safetensors(
+                        {'latent': pixel_latents},
+                        os.path.join(img_cache_dir, img_name + '.safetensors')
+                    )
+                    del pixel_latents
+                else:
+                    cached_image_embeddings[img_name] = pixel_latents
+
+        logger.info(f"✓ Precomputed {len(img_files)} image embeddings")
+        log_memory_usage("after_image_embedding_precomputation")
+
+    return cached_text_embeddings, txt_cache_dir, cached_image_embeddings, img_cache_dir
+
+# ============================================================================
 # DATA LOADING
 # ============================================================================
 
-def setup_dataloader_for_dgx_spark(args, tokenizer, vae, weight_dtype, accelerator):
+def setup_dataloader_for_dgx_spark(args, cached_text_embeddings, txt_cache_dir,
+                                    cached_image_embeddings, img_cache_dir):
     """
     Setup DataLoader optimized for DGX Spark unified memory.
 
     - pin_memory=False (not needed for unified memory)
     - num_workers=4 (lower than discrete GPU)
     - prefetch_factor=4 (moderate prefetch)
-    - Embeddings cached to NVMe, loaded on-demand
+    - Embeddings cached in unified memory or on NVMe
 
     Args:
         args: Training configuration
-        tokenizer: Text tokenizer
-        vae: VAE model for image encoding
-        weight_dtype: torch.bfloat16
-        accelerator: Accelerate Accelerator
+        cached_text_embeddings: Precomputed text embeddings (or None if disk-cached)
+        txt_cache_dir: Text embedding cache directory (or None if memory-cached)
+        cached_image_embeddings: Precomputed image embeddings (or None if disk-cached)
+        img_cache_dir: Image embedding cache directory (or None if memory-cached)
 
     Returns:
         DataLoader configured for unified memory
@@ -318,11 +470,18 @@ def setup_dataloader_for_dgx_spark(args, tokenizer, vae, weight_dtype, accelerat
     # Use existing loader from image_datasets.dataset
     # It already supports embedding caching
     train_dataloader = loader(
-        args=args,
-        tokenizer=tokenizer,
-        vae=vae,
-        weight_dtype=weight_dtype,
-        accelerator=accelerator,
+        train_batch_size=QWEN_LORA_BATCH_SIZE,
+        num_workers=args.data_config.num_workers,
+        pin_memory=False,  # Unified memory doesn't need pinned memory
+        img_dir=args.data_config.img_dir,
+        img_size=args.data_config.img_size,
+        caption_type=args.data_config.caption_type,
+        random_ratio=args.data_config.random_ratio,
+        caption_dropout_rate=args.data_config.caption_dropout_rate,
+        cached_text_embeddings=cached_text_embeddings,
+        cached_image_embeddings=cached_image_embeddings,
+        txt_cache_dir=txt_cache_dir,
+        img_cache_dir=img_cache_dir,
     )
 
     # Verify DataLoader settings
@@ -410,10 +569,15 @@ def train_loop(
             path = dirs[-1] if len(dirs) > 0 else None
 
         if path is not None:
-            accelerator.load_state(os.path.join(args.output_dir, path))
-            global_step = int(path.split("-")[1])
-            first_epoch = global_step // len(train_dataloader)
-            logger.info(f"Resuming from checkpoint: {path} (step {global_step})")
+            checkpoint_path = os.path.join(args.output_dir, path)
+            if os.path.exists(checkpoint_path) and os.path.isdir(checkpoint_path):
+                accelerator.load_state(checkpoint_path)
+                global_step = int(path.split("-")[1])
+                first_epoch = global_step // len(train_dataloader)
+                logger.info(f"Resuming from checkpoint: {path} (step {global_step})")
+            else:
+                logger.warning(f"Checkpoint path not found or invalid: {checkpoint_path}")
+                logger.warning("Starting training from scratch")
 
     # Training loop
     log_memory_usage("before_training_loop")
@@ -433,6 +597,17 @@ def train_loop(
                 # Get latents and prompts from batch
                 latents = batch["latents"].to(weight_dtype)
                 prompt_embeds = batch["prompt_embeds"].to(weight_dtype)
+
+                # Normalize VAE latents (CRITICAL: required for correct training)
+                latents_mean = (
+                    torch.tensor(vae.config.latents_mean)
+                    .view(1, 1, vae.config.z_dim, 1, 1)
+                    .to(latents.device, latents.dtype)
+                )
+                latents_std = 1.0 / torch.tensor(vae.config.latents_std).view(
+                    1, 1, vae.config.z_dim, 1, 1
+                ).to(latents.device, latents.dtype)
+                latents = (latents - latents_mean) * latents_std
 
                 # Sample noise
                 noise = torch.randn_like(latents)
@@ -521,9 +696,6 @@ def train_loop(
 
     # Final checkpoint
     if accelerator.is_main_process:
-        transformer = accelerator.unwrap_model(transformer)
-        transformer = transformer.to(torch.float32)
-
         unwrapped_transformer = accelerator.unwrap_model(transformer)
         lora_state_dict = get_peft_model_state_dict(unwrapped_transformer)
 
@@ -568,7 +740,7 @@ def main():
 
     # Step 3: Setup unified memory environment
     setup_unified_memory_env()
-    logger.info("Unified memory environment configured")
+    early_logger.info("Unified memory environment configured")
 
     # Step 4: Initialize memory monitor
     memory_monitor = DGXSparkMemoryMonitor(
@@ -591,12 +763,13 @@ def main():
         project_config=accelerator_project_config,
     )
 
-    # Configure logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
-    )
+    # NOW we can initialize the accelerate logger
+    global logger
+    logger = get_logger(__name__, log_level="INFO")
+
+    # Update memory monitor with logger instance
+    memory_monitor.logger = logger
+
     logger.info(accelerator.state, main_process_only=False)
 
     if accelerator.is_local_main_process:
@@ -639,18 +812,27 @@ def main():
 
     logger.info("Model loading complete - all models in unified memory")
 
-    # Step 10: Setup DataLoader
-    train_dataloader = setup_dataloader_for_dgx_spark(
+    # Step 10: Precompute embeddings
+    cached_text_embeddings, txt_cache_dir, cached_image_embeddings, img_cache_dir = precompute_embeddings(
         args,
-        text_encoding_pipeline.tokenizer,
+        text_encoding_pipeline,
         vae,
         weight_dtype,
         accelerator
     )
 
+    # Step 11: Setup DataLoader with precomputed embeddings
+    train_dataloader = setup_dataloader_for_dgx_spark(
+        args,
+        cached_text_embeddings,
+        txt_cache_dir,
+        cached_image_embeddings,
+        img_cache_dir
+    )
+
     log_memory_usage("after_dataloader_setup")
 
-    # Step 11: Training loop
+    # Step 12: Training loop
     train_loop(
         args,
         accelerator,

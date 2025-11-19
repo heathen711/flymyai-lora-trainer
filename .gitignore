@@ -52,3 +52,5 @@ ckpts/
 *.gif
 *.webp
 !assets/*
+
+dataset

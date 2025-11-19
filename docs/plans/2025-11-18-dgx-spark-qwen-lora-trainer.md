@@ -1,0 +1,1118 @@
+# DGX Spark Qwen LoRA Training Script Implementation Plan
+
+> **For Claude:** Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Create a DGX Spark (sm_121) exclusive training script for Qwen-Image LoRA that maximizes unified memory performance by enforcing optimal settings and eliminating all memory-saving techniques designed for discrete GPUs.
+
+**Architecture:** Standalone script that validates DGX Spark hardware, overrides config with optimal settings, implements zero-movement model loading, and provides aggressive memory monitoring.
+
+**Tech Stack:** PyTorch with sm_121 support, CUDA 13.0, Accelerate, diffusers, PEFT
+
+**Status:** ⏳ PENDING
+
+---
+
+## Design Decisions from Brainstorming
+
+### Zero-Copy Data Loading Architecture
+- **File-cached embeddings:** Pre-compute embeddings to NVMe, load on-demand (fast enough with unified memory)
+- **No pre-loading entire dataset:** Load what's needed when needed
+- **Account for CUDA driver:** Reserve 1-2GB for driver overhead
+
+### Batch Size Strategy
+- **Hard-coded batch size:** Start with `BATCH_SIZE = 4` for Qwen LoRA
+- **Fine-tune through testing:** Adjust based on actual memory measurements
+- **No dynamic adjustment:** Fixed per model/config
+
+### Auto-Reduction on OOM
+- **Fail immediately:** Raise RuntimeError with clear message to manually reduce batch size
+- **No automatic reduction:** Forces explicit tuning
+
+### Initial Dataset Loading
+- **Pre-cache to filesystem:** Use existing embedding cache system
+- **Load on-demand:** Fast enough with NVMe + unified memory
+- **No bulk preloading:** Avoid long startup times
+
+### Model Selection
+- **One script per model type:** Starting with `train_dgx_spark_qwen_lora.py`
+- **Future scripts:** `train_dgx_spark_flux_lora.py`, `train_dgx_spark_qwen_edit_lora.py`
+- **Optimization per model:** Each script tuned for specific model architecture
+
+### Performance Baseline
+- **No benchmarking mode:** Focus purely on maximum performance
+- **Assume DGX Spark only:** No fallback or comparison code
+
+---
+
+## Memory Budget (128GB Unified Memory)
+
+```
+Component                    Memory Usage
+─────────────────────────────────────────
+CUDA Driver + System:        ~1-2 GB    (reserved overhead)
+Qwen Transformer (bf16):     ~6-8 GB    (full precision, no quantization)
+VAE (bf16):                  ~1-2 GB    (no offloading)
+Text Encoder (bf16):         ~2-3 GB    (no offloading)
+Optimizer States:            ~10-15 GB  (full precision Adam, no 8-bit)
+Activations + Gradients:     ~20-30 GB  (no gradient checkpointing)
+Prefetch Buffer:             ~4-8 GB    (DataLoader prefetch_factor=4)
+Training Headroom:           ~60-80 GB  (for batch processing)
+─────────────────────────────────────────
+SAFE UPPER LIMIT:            115 GB     (leave 13GB safety margin)
+WARNING THRESHOLD:           103.5 GB   (90% of safe limit)
+```
+
+---
+
+## Hard-Coded Optimal Settings
+
+### DGX Spark Enforced Overrides
+
+```python
+DGX_SPARK_OVERRIDES = {
+    # Unified Memory Settings
+    "unified_memory": True,
+    "disable_cpu_offload": True,
+    "pin_memory": False,
+    "disable_quantization": True,
+    "disable_gradient_checkpointing": True,
+
+    # Precision Settings
+    "quantize": False,
+    "adam8bit": False,
+    "mixed_precision": "bf16",
+
+    # Data Loading
+    "save_cache_on_disk": True,  # Cache to NVMe, load on-demand
+    "data_config.num_workers": 4,
+    "data_config.prefetch_factor": 4,
+
+    # CUDA 13.0 Features
+    "cuda_13_features.enable_flash_attention_3": False,  # Unstable on ARM64
+    "cuda_13_features.enable_cudnn_sdp": True,
+    "cuda_13_features.enable_tf32_compute": True,
+    "cuda_13_features.enable_fp8_training": False,
+
+    # Training Batch Size (hard-coded)
+    "data_config.train_batch_size": 4,  # To be tuned
+}
+```
+
+### Environment Variables
+
+```python
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
+    "expandable_segments:True,"
+    "backend:native,"
+    "max_split_size_mb:512"  # Larger splits for unified memory
+)
+os.environ["CUDA_MANAGED_FORCE_DEVICE_ALLOC"] = "1"
+torch.cuda.set_per_process_memory_fraction(0.90)  # Use 90% of 128GB
+```
+
+---
+
+## Implementation Tasks
+
+### Task 1: Create Test Suite for DGX Spark Validation
+
+**Files:**
+- Create: `/home/jay/Documents/flymyai-lora-trainer/tests/test_dgx_spark_trainer.py`
+
+**Step 1: Write failing tests**
+
+```python
+# tests/test_dgx_spark_trainer.py
+import pytest
+import torch
+
+def test_dgx_spark_detection():
+    """Test DGX Spark (sm_121) detection."""
+    from train_dgx_spark_qwen_lora import validate_dgx_spark
+    # This will fail on non-DGX Spark systems, pass on DGX Spark
+    if torch.cuda.get_device_capability() == (12, 1):
+        validate_dgx_spark()  # Should not raise
+    else:
+        with pytest.raises(RuntimeError, match="DGX Spark.*sm_121"):
+            validate_dgx_spark()
+
+def test_config_override():
+    """Test that config is overridden with DGX Spark settings."""
+    from train_dgx_spark_qwen_lora import override_config_for_dgx_spark
+    from omegaconf import OmegaConf
+
+    # User config with suboptimal settings
+    user_config = OmegaConf.create({
+        "unified_memory": False,
+        "quantize": True,
+        "adam8bit": True,
+    })
+
+    final_config = override_config_for_dgx_spark(user_config)
+
+    assert final_config.unified_memory == True
+    assert final_config.quantize == False
+    assert final_config.adam8bit == False
+
+def test_memory_limit_enforcement():
+    """Test that memory limit is enforced."""
+    from train_dgx_spark_qwen_lora import DGXSparkMemoryMonitor
+
+    monitor = DGXSparkMemoryMonitor(safe_limit_gb=115)
+
+    # Simulate exceeding limit
+    with pytest.raises(RuntimeError, match="Memory limit exceeded"):
+        monitor.check_memory_pressure(
+            step=100,
+            allocated_bytes=116_000_000_000  # 116GB > 115GB limit
+        )
+
+def test_zero_movement_model_loading():
+    """Test that models stay on device."""
+    # This test verifies no .to("cpu") calls
+    pass  # Implementation TBD
+```
+
+**Step 2: Run tests to verify they fail**
+
+```bash
+pytest tests/test_dgx_spark_trainer.py -v
+```
+
+Expected: FAIL with "ModuleNotFoundError: No module named 'train_dgx_spark_qwen_lora'"
+
+**Step 3: Commit tests**
+
+```bash
+git add tests/test_dgx_spark_trainer.py
+git commit -m "test: add DGX Spark trainer validation tests"
+```
+
+---
+
+### Task 2: Create Script Skeleton with DGX Spark Validation
+
+**Files:**
+- Create: `/home/jay/Documents/flymyai-lora-trainer/train_dgx_spark_qwen_lora.py`
+
+**Step 1: Implement basic structure**
+
+```python
+#!/usr/bin/env python3
+"""
+train_dgx_spark_qwen_lora.py
+
+DGX Spark (sm_121) optimized Qwen-Image LoRA training script.
+
+This script is EXCLUSIVELY for NVIDIA DGX Spark systems with:
+- ARM64 Blackwell GB10 GPU (compute capability 12.1)
+- 128GB unified CPU-GPU memory
+- CUDA 13.0
+- Custom PyTorch with sm_121 support
+
+NOT for general use. Enforces maximum performance settings.
+
+Author: Generated for DGX Spark optimization
+Date: 2025-11-18
+"""
+
+import argparse
+import copy
+import logging
+import os
+import sys
+
+import torch
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from accelerate.utils import ProjectConfiguration
+from omegaconf import OmegaConf
+from tqdm.auto import tqdm
+
+# Core imports
+import datasets
+import diffusers
+from diffusers import (
+    AutoencoderKLQwenImage,
+    FlowMatchEulerDiscreteScheduler,
+    QwenImagePipeline,
+    QwenImageTransformer2DModel,
+)
+from diffusers.optimization import get_scheduler
+from diffusers.training_utils import (
+    compute_density_for_timestep_sampling,
+    compute_loss_weighting_for_sd3,
+)
+from diffusers.utils.torch_utils import is_compiled_module
+import transformers
+from peft import LoraConfig
+from peft.utils import get_peft_model_state_dict
+
+# Local utilities
+from image_datasets.dataset import loader
+from utils.cuda_utils import enable_tf32, supports_feature, get_optimal_settings
+from utils.unified_memory import setup_unified_memory_env
+from utils.memory_monitor import log_memory_usage, reset_peak_memory_stats, get_memory_stats
+
+logger = get_logger(__name__, log_level="INFO")
+
+# ============================================================================
+# DGX SPARK HARD-CODED SETTINGS
+# ============================================================================
+
+# Hard-coded batch size (tune through testing)
+QWEN_LORA_BATCH_SIZE = 4
+
+# Memory limits (128GB total, reserve headroom)
+SAFE_MEMORY_LIMIT_GB = 115
+WARNING_THRESHOLD_GB = 103.5  # 90% of safe limit
+
+# DGX Spark optimal settings (override config)
+DGX_SPARK_OVERRIDES = {
+    # Unified Memory
+    "unified_memory": True,
+    "disable_cpu_offload": True,
+    "pin_memory": False,
+    "disable_quantization": True,
+    "disable_gradient_checkpointing": True,
+
+    # Precision
+    "quantize": False,
+    "adam8bit": False,
+    "mixed_precision": "bf16",
+
+    # Data Loading
+    "save_cache_on_disk": True,
+
+    # CUDA 13.0 Features
+    "cuda_13_features": {
+        "enable_flash_attention_3": False,  # Unstable on ARM64
+        "enable_cudnn_sdp": True,
+        "enable_tf32_compute": True,
+        "enable_fp8_training": False,
+    },
+}
+
+# ============================================================================
+# DGX SPARK VALIDATION
+# ============================================================================
+
+def validate_dgx_spark():
+    """
+    Validate that we're running on DGX Spark hardware.
+    Fail fast if not.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA not available. This script requires DGX Spark with NVIDIA GPU."
+        )
+
+    # Check compute capability
+    capability = torch.cuda.get_device_capability()
+    if capability != (12, 1):
+        raise RuntimeError(
+            f"This script requires DGX Spark (sm_121, compute capability 12.1). "
+            f"Detected: sm_{capability[0]}{capability[1]} (compute capability {capability[0]}.{capability[1]})\n"
+            f"Use train.py or train_4090.py for other GPUs."
+        )
+
+    # Check unified memory
+    total_memory = torch.cuda.get_device_properties(0).total_memory
+    if total_memory < 120_000_000_000:  # Less than 120GB
+        raise RuntimeError(
+            f"Expected 128GB unified memory for DGX Spark. "
+            f"Found {total_memory / 1e9:.1f}GB. "
+            f"This may not be a DGX Spark system."
+        )
+
+    logger.info("✓ DGX Spark validation passed")
+    logger.info(f"  GPU: sm_121 (Blackwell GB10)")
+    logger.info(f"  Memory: {total_memory / 1e9:.1f}GB unified")
+    logger.info(f"  CUDA: {torch.version.cuda}")
+
+# ============================================================================
+# CONFIG OVERRIDE
+# ============================================================================
+
+def override_config_for_dgx_spark(user_config):
+    """
+    Override user config with DGX Spark optimal settings.
+    Log all changes verbosely.
+    """
+    logger.warning("=" * 80)
+    logger.warning("DGX SPARK MODE: Overriding config for maximum performance")
+    logger.warning("=" * 80)
+
+    # Deep copy to avoid modifying original
+    final_config = OmegaConf.create(user_config)
+
+    # Apply overrides and log changes
+    for key, value in DGX_SPARK_OVERRIDES.items():
+        if key == "cuda_13_features":
+            # Handle nested dict
+            if not hasattr(final_config, "cuda_13_features"):
+                final_config.cuda_13_features = {}
+            for sub_key, sub_value in value.items():
+                old_value = getattr(final_config.cuda_13_features, sub_key, None)
+                if old_value != sub_value:
+                    logger.info(f"  cuda_13_features.{sub_key}: {old_value} → {sub_value}")
+                setattr(final_config.cuda_13_features, sub_key, sub_value)
+        else:
+            old_value = getattr(final_config, key, None)
+            if old_value != value:
+                logger.info(f"  {key}: {old_value} → {value}")
+            setattr(final_config, key, value)
+
+    # Override batch size in data_config
+    if hasattr(final_config, "data_config"):
+        old_bs = getattr(final_config.data_config, "train_batch_size", None)
+        if old_bs != QWEN_LORA_BATCH_SIZE:
+            logger.info(f"  data_config.train_batch_size: {old_bs} → {QWEN_LORA_BATCH_SIZE}")
+        final_config.data_config.train_batch_size = QWEN_LORA_BATCH_SIZE
+
+        # Override num_workers
+        old_workers = getattr(final_config.data_config, "num_workers", None)
+        if old_workers != 4:
+            logger.info(f"  data_config.num_workers: {old_workers} → 4")
+        final_config.data_config.num_workers = 4
+
+    logger.warning("=" * 80)
+
+    return final_config
+
+# ============================================================================
+# MEMORY MONITORING
+# ============================================================================
+
+class DGXSparkMemoryMonitor:
+    """Memory monitoring for DGX Spark unified memory."""
+
+    def __init__(self, safe_limit_gb=115, warning_threshold_gb=103.5):
+        self.safe_limit_bytes = safe_limit_gb * 1e9
+        self.warning_threshold_bytes = warning_threshold_gb * 1e9
+
+    def check_memory_pressure(self, step, allocated_bytes=None):
+        """
+        Check memory pressure and warn/fail if thresholds exceeded.
+
+        Args:
+            step: Current training step
+            allocated_bytes: Optional override for allocated bytes (for testing)
+        """
+        if allocated_bytes is None:
+            stats = get_memory_stats()
+            allocated_bytes = stats["allocated_gb"] * 1e9
+
+        allocated_gb = allocated_bytes / 1e9
+
+        # Critical: exceeding safe limit
+        if allocated_bytes > self.safe_limit_bytes:
+            raise RuntimeError(
+                f"[Step {step}] Memory limit exceeded: {allocated_gb:.1f}GB / {self.safe_limit_bytes/1e9:.0f}GB safe limit.\n"
+                f"Reduce QWEN_LORA_BATCH_SIZE from {QWEN_LORA_BATCH_SIZE} in train_dgx_spark_qwen_lora.py and restart."
+            )
+
+        # Warning: approaching limit
+        if allocated_bytes > self.warning_threshold_bytes:
+            usage_pct = (allocated_bytes / self.safe_limit_bytes) * 100
+            logger.warning(
+                f"[Step {step}] Memory pressure high: {allocated_gb:.1f}GB / {self.safe_limit_bytes/1e9:.0f}GB "
+                f"({usage_pct:.1f}%)"
+            )
+
+# ============================================================================
+# ARGUMENT PARSING
+# ============================================================================
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="DGX Spark optimized Qwen-Image LoRA training"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to training config YAML (settings will be overridden for DGX Spark)",
+    )
+    args = parser.parse_args()
+    return args.config
+
+# ============================================================================
+# MAIN TRAINING FUNCTION
+# ============================================================================
+
+def main():
+    """Main training function."""
+
+    # Step 1: Validate DGX Spark hardware
+    validate_dgx_spark()
+
+    # Step 2: Load and override config
+    config_path = parse_args()
+    user_config = OmegaConf.load(config_path)
+    args = override_config_for_dgx_spark(user_config)
+
+    # Step 3: Setup unified memory environment
+    setup_unified_memory_env()
+    logger.info("Unified memory environment configured")
+
+    # Step 4: Initialize memory monitor
+    memory_monitor = DGXSparkMemoryMonitor(
+        safe_limit_gb=SAFE_MEMORY_LIMIT_GB,
+        warning_threshold_gb=WARNING_THRESHOLD_GB
+    )
+
+    # Step 5: Setup logging
+    logging_dir = os.path.join(args.output_dir, args.logging_dir)
+    accelerator_project_config = ProjectConfiguration(
+        project_dir=args.output_dir,
+        logging_dir=logging_dir
+    )
+
+    # Step 6: Initialize Accelerator
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        mixed_precision=args.mixed_precision,
+        log_with=args.report_to,
+        project_config=accelerator_project_config,
+    )
+
+    # Configure logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.info(accelerator.state, main_process_only=False)
+
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_warning()
+        diffusers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+        diffusers.utils.logging.set_verbosity_error()
+
+    # Enable TF32
+    enable_tf32()
+    logger.info("TF32 compute enabled")
+
+    # Create output directory
+    if accelerator.is_main_process:
+        os.makedirs(args.output_dir, exist_ok=True)
+
+    # Step 7: Determine weight dtype
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+
+    logger.info(f"Weight dtype: {weight_dtype}")
+
+    # Step 8: Log initial memory state
+    reset_peak_memory_stats()
+    log_memory_usage("before_model_loading")
+
+    # TODO: Implement model loading, data loading, training loop
+    logger.info("Training loop implementation pending...")
+
+if __name__ == "__main__":
+    main()
+```
+
+**Step 2: Test basic validation**
+
+```bash
+python train_dgx_spark_qwen_lora.py --config train_configs/train_lora.yaml
+```
+
+Expected on DGX Spark: Validation passes, shows overrides
+Expected on other systems: RuntimeError about sm_121 requirement
+
+**Step 3: Commit skeleton**
+
+```bash
+git add train_dgx_spark_qwen_lora.py
+git commit -m "feat: add DGX Spark Qwen LoRA trainer skeleton with validation"
+```
+
+---
+
+### Task 3: Implement Zero-Movement Model Loading
+
+**Files:**
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/train_dgx_spark_qwen_lora.py`
+
+**Step 1: Add model loading function**
+
+Add after memory monitoring class:
+
+```python
+def load_models_for_dgx_spark(args, weight_dtype, device):
+    """
+    Load all models into unified memory at startup.
+    Models NEVER move during training.
+
+    Args:
+        args: Training configuration
+        weight_dtype: torch.bfloat16 for DGX Spark
+        device: CUDA device (unified memory)
+
+    Returns:
+        tuple: (text_encoding_pipeline, vae, transformer, noise_scheduler, lora_config)
+    """
+    logger.info("Loading models into unified memory (no offloading)...")
+
+    # Load text encoding pipeline (stays on device)
+    text_encoding_pipeline = QwenImagePipeline.from_pretrained(
+        args.pretrained_model_name_or_path,
+        transformer=None,
+        vae=None,
+        torch_dtype=weight_dtype
+    )
+    text_encoding_pipeline.to(device)
+    logger.info("  ✓ Text encoding pipeline loaded to unified memory")
+
+    # Load VAE (stays on device)
+    vae = AutoencoderKLQwenImage.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="vae",
+        torch_dtype=weight_dtype
+    )
+    vae.to(device)
+    logger.info("  ✓ VAE loaded to unified memory")
+
+    # Load transformer (stays on device)
+    transformer = QwenImageTransformer2DModel.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="transformer",
+        torch_dtype=weight_dtype
+    )
+    transformer.to(device)
+    logger.info("  ✓ Transformer loaded to unified memory")
+
+    # Configure LoRA
+    lora_config = LoraConfig(
+        r=args.rank,
+        lora_alpha=args.rank,
+        init_lora_weights="gaussian",
+        target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+    )
+    transformer.add_adapter(lora_config)
+    logger.info(f"  ✓ LoRA adapter added (rank={args.rank})")
+
+    # Load noise scheduler
+    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="scheduler",
+    )
+
+    # Log memory after loading
+    log_memory_usage("after_model_loading")
+
+    logger.info("All models resident in unified memory (no CPU offloading)")
+
+    return text_encoding_pipeline, vae, transformer, noise_scheduler, lora_config
+```
+
+**Step 2: Integrate into main()**
+
+Replace `# TODO: Implement model loading` with:
+
+```python
+# Step 8: Load models into unified memory (zero movement)
+text_encoding_pipeline, vae, transformer, noise_scheduler, lora_config = \
+    load_models_for_dgx_spark(args, weight_dtype, accelerator.device)
+
+# Verify no models on CPU
+assert str(transformer.device) != "cpu", "Transformer moved to CPU!"
+assert str(vae.device) != "cpu", "VAE moved to CPU!"
+
+logger.info("Model loading complete - all models in unified memory")
+```
+
+**Step 3: Test model loading**
+
+```bash
+python train_dgx_spark_qwen_lora.py --config train_configs/train_lora.yaml
+```
+
+Expected: Models load, memory logging shows usage, no CPU offloading
+
+**Step 4: Commit**
+
+```bash
+git add train_dgx_spark_qwen_lora.py
+git commit -m "feat: implement zero-movement model loading for DGX Spark"
+```
+
+---
+
+### Task 4: Implement Data Loading with Unified Memory
+
+**Files:**
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/train_dgx_spark_qwen_lora.py`
+
+**Step 1: Add data loading function**
+
+```python
+def setup_dataloader_for_dgx_spark(args, tokenizer, vae, weight_dtype, accelerator):
+    """
+    Setup DataLoader optimized for DGX Spark unified memory.
+
+    - pin_memory=False (not needed for unified memory)
+    - num_workers=4 (lower than discrete GPU)
+    - prefetch_factor=4 (moderate prefetch)
+    - Embeddings cached to NVMe, loaded on-demand
+
+    Args:
+        args: Training configuration
+        tokenizer: Text tokenizer
+        vae: VAE model for image encoding
+        weight_dtype: torch.bfloat16
+        accelerator: Accelerate Accelerator
+
+    Returns:
+        DataLoader configured for unified memory
+    """
+    logger.info("Setting up DataLoader for unified memory...")
+
+    # Use existing loader from image_datasets.dataset
+    # It already supports embedding caching
+    train_dataloader = loader(
+        args=args,
+        tokenizer=tokenizer,
+        vae=vae,
+        weight_dtype=weight_dtype,
+        accelerator=accelerator,
+    )
+
+    # Verify DataLoader settings
+    assert train_dataloader.pin_memory == False, "pin_memory should be False for unified memory"
+    logger.info(f"  ✓ DataLoader configured:")
+    logger.info(f"    - batch_size: {QWEN_LORA_BATCH_SIZE}")
+    logger.info(f"    - num_workers: {args.data_config.num_workers}")
+    logger.info(f"    - pin_memory: False (unified memory)")
+    logger.info(f"    - prefetch_factor: {getattr(train_dataloader, 'prefetch_factor', 'default')}")
+
+    return train_dataloader
+```
+
+**Step 2: Integrate into main()**
+
+Add after model loading:
+
+```python
+# Step 9: Setup DataLoader
+train_dataloader = setup_dataloader_for_dgx_spark(
+    args,
+    text_encoding_pipeline.tokenizer,
+    vae,
+    weight_dtype,
+    accelerator
+)
+
+log_memory_usage("after_dataloader_setup")
+```
+
+**Step 3: Commit**
+
+```bash
+git add train_dgx_spark_qwen_lora.py
+git commit -m "feat: implement unified memory optimized DataLoader"
+```
+
+---
+
+### Task 5: Implement Training Loop with Memory Monitoring
+
+**Files:**
+- Modify: `/home/jay/Documents/flymyai-lora-trainer/train_dgx_spark_qwen_lora.py`
+
+**Step 1: Add training loop**
+
+```python
+def train_loop(
+    args,
+    accelerator,
+    transformer,
+    vae,
+    text_encoding_pipeline,
+    noise_scheduler,
+    train_dataloader,
+    weight_dtype,
+    memory_monitor
+):
+    """
+    Main training loop with aggressive memory monitoring.
+
+    No CPU offloading, no gradient checkpointing, full precision optimizer.
+    """
+    logger.info("Starting DGX Spark optimized training loop...")
+
+    # Prepare optimizer (full precision Adam, no 8-bit)
+    params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+
+    optimizer = torch.optim.AdamW(
+        params_to_optimize,
+        lr=args.learning_rate,
+        betas=(args.adam_beta1, args.adam_beta2),
+        weight_decay=args.adam_weight_decay,
+        eps=args.adam_epsilon,
+    )
+    logger.info("  ✓ Full precision AdamW optimizer")
+
+    # Learning rate scheduler
+    lr_scheduler = get_scheduler(
+        args.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=args.lr_warmup_steps,
+        num_training_steps=args.max_train_steps,
+    )
+
+    # Prepare with Accelerator
+    transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        transformer, optimizer, train_dataloader, lr_scheduler
+    )
+
+    # Training state
+    global_step = 0
+    first_epoch = 0
+
+    # Resume from checkpoint if available
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint != "latest":
+            path = args.resume_from_checkpoint
+        else:
+            dirs = os.listdir(args.output_dir)
+            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+            path = dirs[-1] if len(dirs) > 0 else None
+
+        if path is not None:
+            accelerator.load_state(os.path.join(args.output_dir, path))
+            global_step = int(path.split("-")[1])
+            first_epoch = global_step // len(train_dataloader)
+            logger.info(f"Resuming from checkpoint: {path} (step {global_step})")
+
+    # Training loop
+    log_memory_usage("before_training_loop")
+
+    progress_bar = tqdm(
+        range(0, args.max_train_steps),
+        initial=global_step,
+        desc="Training",
+        disable=not accelerator.is_local_main_process,
+    )
+
+    for epoch in range(first_epoch, args.max_train_steps):
+        transformer.train()
+
+        for step, batch in enumerate(train_dataloader):
+            with accelerator.accumulate(transformer):
+                # Get latents and prompts from batch
+                latents = batch["latents"].to(weight_dtype)
+                prompt_embeds = batch["prompt_embeds"].to(weight_dtype)
+
+                # Sample noise
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+
+                # Sample timesteps
+                u = torch.rand(bsz, device=latents.device)
+                indices = (u * noise_scheduler.config.num_train_timesteps).long()
+                timesteps = noise_scheduler.timesteps[indices].to(device=latents.device)
+
+                # Add noise to latents
+                sigmas = self._get_sigmas(timesteps, len(latents.shape), latents.dtype)
+                noisy_latents = sigmas * noise + (1.0 - sigmas) * latents
+
+                # Predict noise
+                model_pred = transformer(
+                    hidden_states=noisy_latents,
+                    timestep=timesteps,
+                    encoder_hidden_states=prompt_embeds,
+                    return_dict=False,
+                )[0]
+
+                # Compute loss
+                weighting = compute_loss_weighting_for_sd3(
+                    weighting_scheme="logit_normal",
+                    sigmas=sigmas,
+                )
+                target = latents
+                loss = torch.mean(
+                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(bsz, -1),
+                    dim=1,
+                )
+                loss = loss.mean()
+
+                # Backward pass
+                accelerator.backward(loss)
+
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            # Update progress
+            if accelerator.sync_gradients:
+                progress_bar.update(1)
+                global_step += 1
+
+                # Memory monitoring every 10 steps
+                if global_step % 10 == 0:
+                    memory_monitor.check_memory_pressure(global_step)
+
+                # Detailed logging every 100 steps
+                if global_step % 100 == 0:
+                    log_memory_usage(f"step_{global_step}")
+
+                # Checkpointing
+                if global_step % args.checkpointing_steps == 0:
+                    if accelerator.is_main_process:
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        accelerator.save_state(save_path)
+                        logger.info(f"Saved checkpoint to {save_path}")
+
+                        # Clean up old checkpoints
+                        if args.checkpoints_total_limit is not None:
+                            checkpoints = os.listdir(args.output_dir)
+                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                            if len(checkpoints) > args.checkpoints_total_limit:
+                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit
+                                for checkpoint in checkpoints[:num_to_remove]:
+                                    logger.info(f"Removing old checkpoint: {checkpoint}")
+                                    shutil.rmtree(os.path.join(args.output_dir, checkpoint))
+
+            logs = {
+                "loss": loss.detach().item(),
+                "lr": lr_scheduler.get_last_lr()[0],
+                "step": global_step,
+            }
+            progress_bar.set_postfix(**logs)
+
+            if global_step >= args.max_train_steps:
+                break
+
+    # Final checkpoint
+    if accelerator.is_main_process:
+        transformer = accelerator.unwrap_model(transformer)
+        transformer = transformer.to(torch.float32)
+
+        unwrapped_transformer = accelerator.unwrap_model(transformer)
+        lora_state_dict = get_peft_model_state_dict(unwrapped_transformer)
+
+        save_path = os.path.join(args.output_dir, "pytorch_lora_weights.safetensors")
+        # Use safetensors to save
+        from safetensors.torch import save_file
+        save_file(lora_state_dict, save_path)
+        logger.info(f"Saved final LoRA weights to {save_path}")
+
+    log_memory_usage("training_complete")
+    logger.info("Training complete!")
+```
+
+**Step 2: Add helper function for sigmas**
+
+```python
+def _get_sigmas(self, timesteps, n_dim=4, dtype=torch.float32):
+    """Get sigmas for timesteps."""
+    sigmas = self.noise_scheduler.sigmas.to(device=timesteps.device, dtype=dtype)
+    schedule_timesteps = self.noise_scheduler.timesteps.to(timesteps.device)
+    step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+    sigma = sigmas[step_indices].flatten()
+    while len(sigma.shape) < n_dim:
+        sigma = sigma.unsqueeze(-1)
+    return sigma
+```
+
+**Step 3: Update main() to call training loop**
+
+Replace final TODO with:
+
+```python
+# Step 10: Training loop
+train_loop(
+    args,
+    accelerator,
+    transformer,
+    vae,
+    text_encoding_pipeline,
+    noise_scheduler,
+    train_dataloader,
+    weight_dtype,
+    memory_monitor
+)
+```
+
+**Step 4: Commit**
+
+```bash
+git add train_dgx_spark_qwen_lora.py
+git commit -m "feat: implement training loop with memory monitoring"
+```
+
+---
+
+### Task 6: Create DGX Spark Specific Config
+
+**Files:**
+- Create: `/home/jay/Documents/flymyai-lora-trainer/train_configs/train_dgx_spark_qwen_lora.yaml`
+
+**Step 1: Create config file**
+
+```yaml
+# train_configs/train_dgx_spark_qwen_lora.yaml
+# DGX Spark optimized Qwen-Image LoRA training configuration
+# Settings will be overridden by train_dgx_spark_qwen_lora.py
+
+pretrained_model_name_or_path: "Qwen/Qwen-Image"
+output_dir: "output/dgx_spark_qwen_lora"
+logging_dir: "logs"
+
+# Training hyperparameters
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"
+report_to: "tensorboard"
+learning_rate: 3e-4
+max_train_steps: 3000
+checkpointing_steps: 250
+checkpoints_total_limit: 10
+seed: 42
+
+# Optimizer settings
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# Learning rate schedule
+lr_scheduler: constant
+lr_warmup_steps: 10
+
+# LoRA configuration
+rank: 16
+
+# Data configuration
+data_config:
+  img_dir: "data/images"  # UPDATE THIS
+  img_size: 1024
+  train_batch_size: 4  # Will be overridden
+  num_workers: 4  # Will be overridden
+  caption_dropout_rate: 0.1
+  random_ratio: false
+  caption_type: txt
+
+# Embedding cache
+precompute_text_embeddings: true
+precompute_image_embeddings: true
+save_cache_on_disk: true
+
+# Note: The following settings are overridden by train_dgx_spark_qwen_lora.py
+# unified_memory: true
+# disable_cpu_offload: true
+# pin_memory: false
+# disable_quantization: true
+# quantize: false
+# adam8bit: false
+# cuda_13_features.enable_flash_attention_3: false
+# cuda_13_features.enable_cudnn_sdp: true
+# cuda_13_features.enable_tf32_compute: true
+```
+
+**Step 2: Commit**
+
+```bash
+git add train_configs/train_dgx_spark_qwen_lora.yaml
+git commit -m "feat: add DGX Spark Qwen LoRA config"
+```
+
+---
+
+### Task 7: Testing and Tuning
+
+**Files:**
+- Test run and adjust `QWEN_LORA_BATCH_SIZE`
+
+**Step 1: Initial test run**
+
+```bash
+# Activate venv with custom PyTorch
+source venv/bin/activate
+
+# Verify sm_121 support
+python -c "import torch; print(f'sm_121: {\"sm_121\" in torch.cuda.get_arch_list()}')"
+
+# Run training with small dataset
+python train_dgx_spark_qwen_lora.py --config train_configs/train_dgx_spark_qwen_lora.yaml
+```
+
+**Step 2: Monitor memory usage**
+
+Watch for logs:
+```
+[before_model_loading] Memory: Allocated=X.XXG, Reserved=X.XXG
+[after_model_loading] Memory: Allocated=X.XXG, Reserved=X.XXG
+[step_100] Memory: Allocated=X.XXG, Reserved=X.XXG
+```
+
+**Step 3: Tune batch size**
+
+If memory usage < 100GB at step_100:
+- Increase `QWEN_LORA_BATCH_SIZE` to 6 or 8
+
+If memory warnings appear:
+- Decrease `QWEN_LORA_BATCH_SIZE` to 3 or 2
+
+**Step 4: Document final batch size**
+
+Update plan with final tuned batch size.
+
+**Step 5: Commit tuning results**
+
+```bash
+git add train_dgx_spark_qwen_lora.py
+git commit -m "tune: adjust batch size based on memory measurements"
+```
+
+---
+
+## Success Criteria
+
+1. ✅ Script validates DGX Spark hardware (fails on other systems)
+2. ✅ Config is overridden with optimal settings (logged verbosely)
+3. ✅ Models loaded into unified memory (never move to CPU)
+4. ✅ DataLoader configured for unified memory (pin_memory=False)
+5. ✅ Training loop runs without CPU offloading
+6. ✅ Memory monitoring warns at 90%, fails at 115GB
+7. ✅ Batch size tuned for maximum utilization
+8. ✅ No quantization, 8-bit optimizer, or gradient checkpointing
+9. ✅ Training completes and saves LoRA weights
+
+---
+
+## Future Work
+
+After Qwen LoRA script is complete and validated:
+
+1. **train_dgx_spark_flux_lora.py** - FLUX model variant
+2. **train_dgx_spark_qwen_edit_lora.py** - Qwen-Image-Edit variant
+3. **Benchmark suite** - Compare training speed vs train_4090.py
+4. **Documentation** - Update README with DGX Spark usage
+
+---
+
+## References
+
+- DGX Spark Setup: ~/.claude/knowledge/dgx-spark-custom-wheels.md
+- Unified Memory Implementation: docs/plans/2025-11-16-dgx-spark-unified-memory.md
+- GPU Compatibility: docs/GPU_COMPATIBILITY.md
+- ARM64 Compatibility: docs/AARCH64_SBSA_COMPATIBILITY.md

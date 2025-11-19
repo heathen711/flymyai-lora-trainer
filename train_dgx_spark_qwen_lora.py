@@ -221,6 +221,76 @@ class DGXSparkMemoryMonitor:
             )
 
 # ============================================================================
+# MODEL LOADING
+# ============================================================================
+
+def load_models_for_dgx_spark(args, weight_dtype, device):
+    """
+    Load all models into unified memory at startup.
+    Models NEVER move during training.
+
+    Args:
+        args: Training configuration
+        weight_dtype: torch.bfloat16 for DGX Spark
+        device: CUDA device (unified memory)
+
+    Returns:
+        tuple: (text_encoding_pipeline, vae, transformer, noise_scheduler, lora_config)
+    """
+    logger.info("Loading models into unified memory (no offloading)...")
+
+    # Load text encoding pipeline (stays on device)
+    text_encoding_pipeline = QwenImagePipeline.from_pretrained(
+        args.pretrained_model_name_or_path,
+        transformer=None,
+        vae=None,
+        torch_dtype=weight_dtype
+    )
+    text_encoding_pipeline.to(device)
+    logger.info("  ✓ Text encoding pipeline loaded to unified memory")
+
+    # Load VAE (stays on device)
+    vae = AutoencoderKLQwenImage.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="vae",
+        torch_dtype=weight_dtype
+    )
+    vae.to(device)
+    logger.info("  ✓ VAE loaded to unified memory")
+
+    # Load transformer (stays on device)
+    transformer = QwenImageTransformer2DModel.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="transformer",
+        torch_dtype=weight_dtype
+    )
+    transformer.to(device)
+    logger.info("  ✓ Transformer loaded to unified memory")
+
+    # Configure LoRA
+    lora_config = LoraConfig(
+        r=args.rank,
+        lora_alpha=args.rank,
+        init_lora_weights="gaussian",
+        target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+    )
+    transformer.add_adapter(lora_config)
+    logger.info(f"  ✓ LoRA adapter added (rank={args.rank})")
+
+    # Load noise scheduler
+    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="scheduler",
+    )
+
+    # Log memory after loading
+    log_memory_usage("after_model_loading")
+
+    logger.info("All models resident in unified memory (no CPU offloading)")
+
+    return text_encoding_pipeline, vae, transformer, noise_scheduler, lora_config
+
+# ============================================================================
 # ARGUMENT PARSING
 # ============================================================================
 
@@ -315,8 +385,18 @@ def main():
     reset_peak_memory_stats()
     log_memory_usage("before_model_loading")
 
-    # TODO: Implement model loading, data loading, training loop
-    logger.info("Training loop implementation pending...")
+    # Step 9: Load models into unified memory (zero movement)
+    text_encoding_pipeline, vae, transformer, noise_scheduler, lora_config = \
+        load_models_for_dgx_spark(args, weight_dtype, accelerator.device)
+
+    # Verify no models on CPU
+    assert str(transformer.device) != "cpu", "Transformer moved to CPU!"
+    assert str(vae.device) != "cpu", "VAE moved to CPU!"
+
+    logger.info("Model loading complete - all models in unified memory")
+
+    # TODO: Implement data loading, training loop
+    logger.info("Data loading and training loop implementation pending...")
 
 if __name__ == "__main__":
     main()

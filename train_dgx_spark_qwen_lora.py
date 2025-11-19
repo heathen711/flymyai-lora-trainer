@@ -23,6 +23,18 @@ import os
 import sys
 
 import torch
+
+# CRITICAL: Disable Flash Attention immediately after importing torch
+# Flash Attention 3 is unstable on ARM64 + sm_121 (see CLAUDE.md)
+# Must be set before any model loading
+torch.backends.cuda.enable_flash_sdp(False)  # Disable Flash Attention
+torch.backends.cuda.enable_math_sdp(True)    # Enable math fallback
+torch.backends.cuda.enable_mem_efficient_sdp(True)  # Enable memory-efficient attention
+try:
+    # cuDNN backend is only available on newer PyTorch versions
+    torch.backends.cuda.enable_cudnn_sdp(True)  # Enable cuDNN SDPA
+except AttributeError:
+    pass  # Older PyTorch version
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration
@@ -400,9 +412,10 @@ def train_loop(
     first_epoch = 0
 
     # Resume from checkpoint if available
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint != "latest":
-            path = args.resume_from_checkpoint
+    resume_from_checkpoint = getattr(args, 'resume_from_checkpoint', None)
+    if resume_from_checkpoint:
+        if resume_from_checkpoint != "latest":
+            path = resume_from_checkpoint
         else:
             dirs = os.listdir(args.output_dir)
             dirs = [d for d in dirs if d.startswith("checkpoint")]
@@ -569,6 +582,21 @@ def main():
     # Step 3: Setup unified memory environment
     setup_unified_memory_env()
     logger.info("Unified memory environment configured")
+
+    # Step 3.5: Log Flash Attention status
+    logger.warning("=" * 80)
+    logger.warning("ATTENTION BACKEND CONFIGURATION")
+    logger.warning("=" * 80)
+    logger.warning(f"  Flash SDPA:          {'ENABLED' if torch.backends.cuda.flash_sdp_enabled() else 'DISABLED'}")
+    logger.warning(f"  Memory-Efficient:    {'ENABLED' if torch.backends.cuda.mem_efficient_sdp_enabled() else 'DISABLED'}")
+    logger.warning(f"  Math SDPA:           {'ENABLED' if torch.backends.cuda.math_sdp_enabled() else 'DISABLED'}")
+    try:
+        logger.warning(f"  cuDNN SDPA:          {'ENABLED' if torch.backends.cuda.cudnn_sdp_enabled() else 'DISABLED'}")
+    except AttributeError:
+        logger.warning(f"  cuDNN SDPA:          NOT AVAILABLE (PyTorch version)")
+    logger.warning("  → Flash Attention 3 is DISABLED (unstable on ARM64 + sm_121)")
+    logger.warning("  → Using cuDNN/Memory-Efficient backends instead")
+    logger.warning("=" * 80)
 
     # Step 4: Initialize memory monitor
     memory_monitor = DGXSparkMemoryMonitor(

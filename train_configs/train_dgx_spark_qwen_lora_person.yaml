@@ -7,6 +7,10 @@ pretrained_model_name_or_path: "Qwen/Qwen-Image"
 output_dir: "output/dgx_spark_qwen_lora_person"
 logging_dir: "logs"
 
+# Resume training from checkpoint (optional)
+# Set to "latest" to resume from the most recent checkpoint, or specify a checkpoint path
+# resume_from_checkpoint: "latest"
+
 # Training hyperparameters - Person focus
 # Higher rank for detailed facial features and expressions
 # Lower learning rate to preserve identity consistency

@@ -291,6 +291,51 @@ def load_models_for_dgx_spark(args, weight_dtype, device):
     return text_encoding_pipeline, vae, transformer, noise_scheduler, lora_config
 
 # ============================================================================
+# DATA LOADING
+# ============================================================================
+
+def setup_dataloader_for_dgx_spark(args, tokenizer, vae, weight_dtype, accelerator):
+    """
+    Setup DataLoader optimized for DGX Spark unified memory.
+
+    - pin_memory=False (not needed for unified memory)
+    - num_workers=4 (lower than discrete GPU)
+    - prefetch_factor=4 (moderate prefetch)
+    - Embeddings cached to NVMe, loaded on-demand
+
+    Args:
+        args: Training configuration
+        tokenizer: Text tokenizer
+        vae: VAE model for image encoding
+        weight_dtype: torch.bfloat16
+        accelerator: Accelerate Accelerator
+
+    Returns:
+        DataLoader configured for unified memory
+    """
+    logger.info("Setting up DataLoader for unified memory...")
+
+    # Use existing loader from image_datasets.dataset
+    # It already supports embedding caching
+    train_dataloader = loader(
+        args=args,
+        tokenizer=tokenizer,
+        vae=vae,
+        weight_dtype=weight_dtype,
+        accelerator=accelerator,
+    )
+
+    # Verify DataLoader settings
+    assert train_dataloader.pin_memory == False, "pin_memory should be False for unified memory"
+    logger.info(f"  ✓ DataLoader configured:")
+    logger.info(f"    - batch_size: {QWEN_LORA_BATCH_SIZE}")
+    logger.info(f"    - num_workers: {args.data_config.num_workers}")
+    logger.info(f"    - pin_memory: False (unified memory)")
+    logger.info(f"    - prefetch_factor: {getattr(train_dataloader, 'prefetch_factor', 'default')}")
+
+    return train_dataloader
+
+# ============================================================================
 # ARGUMENT PARSING
 # ============================================================================
 
@@ -395,8 +440,19 @@ def main():
 
     logger.info("Model loading complete - all models in unified memory")
 
-    # TODO: Implement data loading, training loop
-    logger.info("Data loading and training loop implementation pending...")
+    # Step 10: Setup DataLoader
+    train_dataloader = setup_dataloader_for_dgx_spark(
+        args,
+        text_encoding_pipeline.tokenizer,
+        vae,
+        weight_dtype,
+        accelerator
+    )
+
+    log_memory_usage("after_dataloader_setup")
+
+    # TODO: Implement training loop
+    logger.info("Training loop implementation pending...")
 
 if __name__ == "__main__":
     main()

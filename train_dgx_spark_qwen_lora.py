@@ -336,6 +336,205 @@ def setup_dataloader_for_dgx_spark(args, tokenizer, vae, weight_dtype, accelerat
     return train_dataloader
 
 # ============================================================================
+# TRAINING LOOP
+# ============================================================================
+
+def _get_sigmas(noise_scheduler, timesteps, n_dim=4, dtype=torch.float32):
+    """Get sigmas for timesteps."""
+    sigmas = noise_scheduler.sigmas.to(device=timesteps.device, dtype=dtype)
+    schedule_timesteps = noise_scheduler.timesteps.to(timesteps.device)
+    step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+    sigma = sigmas[step_indices].flatten()
+    while len(sigma.shape) < n_dim:
+        sigma = sigma.unsqueeze(-1)
+    return sigma
+
+def train_loop(
+    args,
+    accelerator,
+    transformer,
+    vae,
+    text_encoding_pipeline,
+    noise_scheduler,
+    train_dataloader,
+    weight_dtype,
+    memory_monitor
+):
+    """
+    Main training loop with aggressive memory monitoring.
+
+    No CPU offloading, no gradient checkpointing, full precision optimizer.
+    """
+    import shutil
+    from safetensors.torch import save_file
+
+    logger.info("Starting DGX Spark optimized training loop...")
+
+    # Prepare optimizer (full precision Adam, no 8-bit)
+    params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+
+    optimizer = torch.optim.AdamW(
+        params_to_optimize,
+        lr=args.learning_rate,
+        betas=(args.adam_beta1, args.adam_beta2),
+        weight_decay=args.adam_weight_decay,
+        eps=args.adam_epsilon,
+    )
+    logger.info("  ✓ Full precision AdamW optimizer")
+
+    # Learning rate scheduler
+    lr_scheduler = get_scheduler(
+        args.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=args.lr_warmup_steps,
+        num_training_steps=args.max_train_steps,
+    )
+
+    # Prepare with Accelerator
+    transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        transformer, optimizer, train_dataloader, lr_scheduler
+    )
+
+    # Training state
+    global_step = 0
+    first_epoch = 0
+
+    # Resume from checkpoint if available
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint != "latest":
+            path = args.resume_from_checkpoint
+        else:
+            dirs = os.listdir(args.output_dir)
+            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+            path = dirs[-1] if len(dirs) > 0 else None
+
+        if path is not None:
+            accelerator.load_state(os.path.join(args.output_dir, path))
+            global_step = int(path.split("-")[1])
+            first_epoch = global_step // len(train_dataloader)
+            logger.info(f"Resuming from checkpoint: {path} (step {global_step})")
+
+    # Training loop
+    log_memory_usage("before_training_loop")
+
+    progress_bar = tqdm(
+        range(0, args.max_train_steps),
+        initial=global_step,
+        desc="Training",
+        disable=not accelerator.is_local_main_process,
+    )
+
+    for epoch in range(first_epoch, args.max_train_steps):
+        transformer.train()
+
+        for step, batch in enumerate(train_dataloader):
+            with accelerator.accumulate(transformer):
+                # Get latents and prompts from batch
+                latents = batch["latents"].to(weight_dtype)
+                prompt_embeds = batch["prompt_embeds"].to(weight_dtype)
+
+                # Sample noise
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+
+                # Sample timesteps
+                u = torch.rand(bsz, device=latents.device)
+                indices = (u * noise_scheduler.config.num_train_timesteps).long()
+                timesteps = noise_scheduler.timesteps[indices].to(device=latents.device)
+
+                # Add noise to latents
+                sigmas = _get_sigmas(noise_scheduler, timesteps, len(latents.shape), latents.dtype)
+                noisy_latents = sigmas * noise + (1.0 - sigmas) * latents
+
+                # Predict noise
+                model_pred = transformer(
+                    hidden_states=noisy_latents,
+                    timestep=timesteps,
+                    encoder_hidden_states=prompt_embeds,
+                    return_dict=False,
+                )[0]
+
+                # Compute loss
+                weighting = compute_loss_weighting_for_sd3(
+                    weighting_scheme="logit_normal",
+                    sigmas=sigmas,
+                )
+                target = latents
+                loss = torch.mean(
+                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(bsz, -1),
+                    dim=1,
+                )
+                loss = loss.mean()
+
+                # Backward pass
+                accelerator.backward(loss)
+
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            # Update progress
+            if accelerator.sync_gradients:
+                progress_bar.update(1)
+                global_step += 1
+
+                # Memory monitoring every 10 steps
+                if global_step % 10 == 0:
+                    memory_monitor.check_memory_pressure(global_step)
+
+                # Detailed logging every 100 steps
+                if global_step % 100 == 0:
+                    log_memory_usage(f"step_{global_step}")
+
+                # Checkpointing
+                if global_step % args.checkpointing_steps == 0:
+                    if accelerator.is_main_process:
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        accelerator.save_state(save_path)
+                        logger.info(f"Saved checkpoint to {save_path}")
+
+                        # Clean up old checkpoints
+                        if args.checkpoints_total_limit is not None:
+                            checkpoints = os.listdir(args.output_dir)
+                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                            if len(checkpoints) > args.checkpoints_total_limit:
+                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit
+                                for checkpoint in checkpoints[:num_to_remove]:
+                                    logger.info(f"Removing old checkpoint: {checkpoint}")
+                                    shutil.rmtree(os.path.join(args.output_dir, checkpoint))
+
+            logs = {
+                "loss": loss.detach().item(),
+                "lr": lr_scheduler.get_last_lr()[0],
+                "step": global_step,
+            }
+            progress_bar.set_postfix(**logs)
+
+            if global_step >= args.max_train_steps:
+                break
+
+    # Final checkpoint
+    if accelerator.is_main_process:
+        transformer = accelerator.unwrap_model(transformer)
+        transformer = transformer.to(torch.float32)
+
+        unwrapped_transformer = accelerator.unwrap_model(transformer)
+        lora_state_dict = get_peft_model_state_dict(unwrapped_transformer)
+
+        save_path = os.path.join(args.output_dir, "pytorch_lora_weights.safetensors")
+        save_file(lora_state_dict, save_path)
+        logger.info(f"Saved final LoRA weights to {save_path}")
+
+    log_memory_usage("training_complete")
+    logger.info("Training complete!")
+
+# ============================================================================
 # ARGUMENT PARSING
 # ============================================================================
 
@@ -451,8 +650,18 @@ def main():
 
     log_memory_usage("after_dataloader_setup")
 
-    # TODO: Implement training loop
-    logger.info("Training loop implementation pending...")
+    # Step 11: Training loop
+    train_loop(
+        args,
+        accelerator,
+        transformer,
+        vae,
+        text_encoding_pipeline,
+        noise_scheduler,
+        train_dataloader,
+        weight_dtype,
+        memory_monitor
+    )
 
 if __name__ == "__main__":
     main()

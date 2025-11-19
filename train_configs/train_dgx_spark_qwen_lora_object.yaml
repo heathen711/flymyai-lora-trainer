@@ -1,0 +1,71 @@
+# train_configs/train_dgx_spark_qwen_lora_object.yaml
+# DGX Spark optimized Qwen-Image LoRA training - OBJECT/PRODUCT FOCUS
+# Optimized for learning specific objects, products, items, props
+# Settings will be overridden by train_dgx_spark_qwen_lora.py
+
+pretrained_model_name_or_path: "Qwen/Qwen-Image"
+output_dir: "output/dgx_spark_qwen_lora_object"
+logging_dir: "logs"
+
+# Training hyperparameters - Object focus
+# Lower rank for focused object features
+# Standard learning rate for object details
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"
+report_to: "tensorboard"
+learning_rate: 3e-4  # Standard rate for object learning
+max_train_steps: 3000  # Standard training duration
+checkpointing_steps: 250
+checkpoints_total_limit: 10
+seed: 42
+
+# Optimizer settings
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# Learning rate schedule
+lr_scheduler: constant  # Constant for stable object feature learning
+lr_warmup_steps: 50
+
+# LoRA configuration - Object focus
+rank: 20  # Moderate rank for object shape, texture, materials
+
+# Data configuration
+data_config:
+  img_dir: "data/object_training"  # UPDATE THIS
+  img_size: 1024
+  train_batch_size: 4  # Will be overridden by script
+  num_workers: 4  # Will be overridden by script
+  caption_dropout_rate: 0.08  # Low dropout - object identity is caption-dependent
+  random_ratio: false  # Preserve object proportions
+  caption_type: txt
+
+# Embedding cache
+precompute_text_embeddings: true
+precompute_image_embeddings: true
+save_cache_on_disk: true
+
+# Training tips for object/product LoRA:
+# - Use 12-25 high quality images of the object
+# - Include variety: different angles (360° coverage ideal), lighting, contexts
+# - Captions should describe: "[object_trigger], [material], [color], [context/background]"
+# - Example: "ohwx sword, ornate metal, silver with gold inlay, held by hand"
+# - Consistent object trigger (e.g., "ohwx sword", "sks car", "xyz robot")
+# - Mix of angles: front (25%), side (25%), three-quarter (30%), back (10%), detail shots (10%)
+# - Vary backgrounds: plain (40%), simple context (40%), complex scenes (20%)
+# - Include different scales: close-up details, full object, object in use
+# - Consistent lighting helps: mix of studio lighting and natural contexts
+
+# Note: The following settings are overridden by train_dgx_spark_qwen_lora.py
+# unified_memory: true
+# disable_cpu_offload: true
+# pin_memory: false
+# disable_quantization: true
+# quantize: false
+# adam8bit: false
+# cuda_13_features.enable_flash_attention_3: false
+# cuda_13_features.enable_cudnn_sdp: true
+# cuda_13_features.enable_tf32_compute: true

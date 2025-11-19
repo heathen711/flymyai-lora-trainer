@@ -71,6 +71,21 @@ from utils.fast_loading import save_embeddings_safetensors
 from utils.unified_memory import setup_unified_memory_env
 from utils.memory_monitor import log_memory_usage, reset_peak_memory_stats, get_memory_stats
 
+# ============================================================================
+# FILE FILTERING HELPERS
+# ============================================================================
+
+# Supported image extensions (case-insensitive)
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif'}
+
+def is_image_file(filename):
+    """Check if a file is an image based on extension (case-insensitive)."""
+    return os.path.splitext(filename.lower())[1] in IMAGE_EXTENSIONS
+
+def is_text_file(filename):
+    """Check if a file is a text caption file (case-insensitive)."""
+    return filename.lower().endswith('.txt')
+
 # Use standard logging for early validation (before Accelerator init)
 # Will switch to accelerate logger after Accelerator is initialized
 logging.basicConfig(
@@ -374,7 +389,7 @@ def precompute_embeddings(args, text_encoding_pipeline, vae, weight_dtype, accel
                 logger.info("  Keeping text embeddings in unified memory")
 
             # Process all text files
-            txt_files = [i for i in os.listdir(args.data_config.img_dir) if ".txt" in i]
+            txt_files = [i for i in os.listdir(args.data_config.img_dir) if is_text_file(i)]
 
             # Warmup call to compile CUDA kernels (first call is slow on sm_121)
             logger.info("  Warming up text encoder...")
@@ -452,8 +467,7 @@ def precompute_embeddings(args, text_encoding_pipeline, vae, weight_dtype, accel
             logger.info("  Keeping image embeddings in unified memory")
 
         with torch.no_grad():
-            img_files = [i for i in os.listdir(args.data_config.img_dir)
-                        if ".png" in i or ".jpg" in i or ".jpeg" in i or ".JPG" in i or ".PNG" in i]
+            img_files = [i for i in os.listdir(args.data_config.img_dir) if is_image_file(i)]
             for img_name in tqdm(img_files, desc="Encoding images"):
                 img = Image.open(os.path.join(args.data_config.img_dir, img_name)).convert('RGB')
                 img = image_resize(img, args.data_config.img_size)

@@ -9,6 +9,13 @@ import random
 from utils.fast_loading import load_embeddings_safetensors
 import torch.nn.functional as F
 
+# Supported image extensions (case-insensitive)
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif'}
+
+def is_image_file(filename):
+    """Check if a file is an image based on extension (case-insensitive)."""
+    return os.path.splitext(filename.lower())[1] in IMAGE_EXTENSIONS
+
 def throw_one(probability: float) -> int:
     return 1 if random.random() < probability else 0
 
@@ -158,7 +165,7 @@ class CustomImageDataset(Dataset):
     def __init__(self, img_dir, img_size=512, caption_type='txt',
                  random_ratio=False, caption_dropout_rate=0.1, cached_text_embeddings=None,
                  cached_image_embeddings=None, txt_cache_dir=None, img_cache_dir=None):
-        self.images = [os.path.join(img_dir, i) for i in os.listdir(img_dir) if '.jpg' in i or '.png' in i]
+        self.images = [os.path.join(img_dir, i) for i in os.listdir(img_dir) if is_image_file(i)]
         self.images.sort()
         self.img_size = img_size
         self.caption_type = caption_type

@@ -1,0 +1,78 @@
+# train_configs/train_dgx_spark_qwen_lora_concept.yaml
+# DGX Spark optimized Qwen-Image LoRA training - CONCEPT/THEME FOCUS
+# Optimized for learning abstract concepts, moods, themes, aesthetic combinations
+# Settings will be overridden by train_dgx_spark_qwen_lora.py
+
+pretrained_model_name_or_path: "Qwen/Qwen-Image"
+output_dir: "output/dgx_spark_qwen_lora_concept"
+logging_dir: "logs"
+
+# Training hyperparameters - Concept focus
+# Lower rank for abstract patterns
+# Higher learning rate with more steps for concept convergence
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"
+report_to: "tensorboard"
+learning_rate: 5e-4  # Higher rate for abstract concept learning
+max_train_steps: 4000  # More steps for nuanced concept learning
+checkpointing_steps: 250
+checkpoints_total_limit: 10
+seed: 42
+
+# Optimizer settings
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.03  # Higher weight decay to prevent overfitting to specific images
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# Learning rate schedule
+lr_scheduler: polynomial  # Polynomial decay for smooth concept refinement
+lr_warmup_steps: 100
+
+# LoRA configuration - Concept focus
+rank: 12  # Lower rank - concepts are abstract, high-level patterns
+
+# Data configuration
+data_config:
+  img_dir: "data/concept_training"  # UPDATE THIS
+  img_size: 1024
+  train_batch_size: 4  # Will be overridden by script
+  num_workers: 4  # Will be overridden by script
+  caption_dropout_rate: 0.3  # High dropout - learn visual patterns, not specific captions
+  random_ratio: true  # Varied crops help learn abstract patterns
+  caption_type: txt
+
+# Embedding cache
+precompute_text_embeddings: true
+precompute_image_embeddings: true
+save_cache_on_disk: true
+
+# Training tips for concept/theme LoRA:
+# - Use 15-40 diverse images that share the concept/mood/theme
+# - Maximum variety in subjects, compositions - only common thread is the concept
+# - Captions should describe: "[concept_trigger], [mood elements], [visual characteristics]"
+# - Example: "liminal space aesthetic, eerie atmosphere, fluorescent lighting, empty hallways"
+# - Consistent concept trigger (e.g., "liminal space aesthetic", "solarpunk vibe", "dreamy atmosphere")
+# - Extreme diversity in content: people, objects, scenes - all embodying the concept
+# - Focus on repeating visual/emotional elements across varied contexts
+# - Can combine: lighting style + color palette + composition rules + emotional tone
+# - Examples of concepts: "nostalgic 90s", "cosmic horror", "cozy cottagecore", "neon cyberpunk vibes"
+
+# Advanced concept training notes:
+# - Concepts are the most abstract LoRA type - they capture "vibes" not objects
+# - High caption dropout forces visual pattern learning over text association
+# - Lower rank prevents memorization of specific images
+# - Diverse dataset is critical - same concept applied to totally different scenes
+# - Test with varied prompts to ensure concept transfers broadly
+
+# Note: The following settings are overridden by train_dgx_spark_qwen_lora.py
+# unified_memory: true
+# disable_cpu_offload: true
+# pin_memory: false
+# disable_quantization: true
+# quantize: false
+# adam8bit: false
+# cuda_13_features.enable_flash_attention_3: false
+# cuda_13_features.enable_cudnn_sdp: true
+# cuda_13_features.enable_tf32_compute: true

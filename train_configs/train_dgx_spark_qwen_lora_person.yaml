@@ -1,0 +1,68 @@
+# train_configs/train_dgx_spark_qwen_lora_person.yaml
+# DGX Spark optimized Qwen-Image LoRA training - PERSON/CHARACTER FOCUS
+# Optimized for learning faces, expressions, poses, clothing details
+# Settings will be overridden by train_dgx_spark_qwen_lora.py
+
+pretrained_model_name_or_path: "Qwen/Qwen-Image"
+output_dir: "output/dgx_spark_qwen_lora_person"
+logging_dir: "logs"
+
+# Training hyperparameters - Person focus
+# Higher rank for detailed facial features and expressions
+# Lower learning rate to preserve identity consistency
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"
+report_to: "tensorboard"
+learning_rate: 2e-4  # Lower than default for stable identity learning
+max_train_steps: 5000  # More steps for detailed person features
+checkpointing_steps: 250
+checkpoints_total_limit: 10
+seed: 42
+
+# Optimizer settings
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# Learning rate schedule
+lr_scheduler: cosine_with_restarts  # Cosine for smoother convergence on faces
+lr_warmup_steps: 100  # Longer warmup for stability
+
+# LoRA configuration - Person focus
+rank: 32  # Higher rank for detailed facial features, expressions, clothing
+
+# Data configuration
+data_config:
+  img_dir: "data/person_training"  # UPDATE THIS
+  img_size: 1024
+  train_batch_size: 4  # Will be overridden by script
+  num_workers: 4  # Will be overridden by script
+  caption_dropout_rate: 0.05  # Low dropout - captions critical for person identity
+  random_ratio: false
+  caption_type: txt
+
+# Embedding cache
+precompute_text_embeddings: true
+precompute_image_embeddings: true
+save_cache_on_disk: true
+
+# Training tips for person/character LoRA:
+# - Use 15-30 high quality images minimum
+# - Include variety: different angles, expressions, lighting, outfits
+# - Captions should describe: "[trigger_word], [expression], [outfit], [pose], [background]"
+# - Example: "ohwx person, smiling, wearing red dress, standing pose, outdoor garden"
+# - Consistent trigger word (e.g., "ohwx person", "sks person")
+# - Balance close-ups (40%) and full-body shots (60%)
+
+# Note: The following settings are overridden by train_dgx_spark_qwen_lora.py
+# unified_memory: true
+# disable_cpu_offload: true
+# pin_memory: false
+# disable_quantization: true
+# quantize: false
+# adam8bit: false
+# cuda_13_features.enable_flash_attention_3: false
+# cuda_13_features.enable_cudnn_sdp: true
+# cuda_13_features.enable_tf32_compute: true

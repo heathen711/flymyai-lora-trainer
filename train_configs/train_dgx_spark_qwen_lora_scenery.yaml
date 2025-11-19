@@ -1,0 +1,70 @@
+# train_configs/train_dgx_spark_qwen_lora_scenery.yaml
+# DGX Spark optimized Qwen-Image LoRA training - SCENERY/ENVIRONMENT FOCUS
+# Optimized for learning landscapes, environments, backgrounds, architectural details
+# Settings will be overridden by train_dgx_spark_qwen_lora.py
+
+pretrained_model_name_or_path: "Qwen/Qwen-Image"
+output_dir: "output/dgx_spark_qwen_lora_scenery"
+logging_dir: "logs"
+
+# Training hyperparameters - Scenery focus
+# Moderate rank for environmental patterns
+# Balanced learning rate for spatial details
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"
+report_to: "tensorboard"
+learning_rate: 3e-4  # Standard rate for environment learning
+max_train_steps: 3500  # Moderate steps for spatial patterns
+checkpointing_steps: 250
+checkpoints_total_limit: 10
+seed: 42
+
+# Optimizer settings
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# Learning rate schedule
+lr_scheduler: cosine  # Smooth cosine decay for gradual refinement
+lr_warmup_steps: 75
+
+# LoRA configuration - Scenery focus
+rank: 24  # Moderate-high rank for spatial details, lighting, atmosphere
+
+# Data configuration
+data_config:
+  img_dir: "data/scenery_training"  # UPDATE THIS
+  img_size: 1024
+  train_batch_size: 4  # Will be overridden by script
+  num_workers: 4  # Will be overridden by script
+  caption_dropout_rate: 0.1  # Low-moderate dropout - location details matter
+  random_ratio: true  # Allow varied crops for different composition views
+  caption_type: txt
+
+# Embedding cache
+precompute_text_embeddings: true
+precompute_image_embeddings: true
+save_cache_on_disk: true
+
+# Training tips for scenery/environment LoRA:
+# - Use 20-40 images of the specific location/environment type
+# - Include variety: different times of day, weather, seasons, angles
+# - Captions should describe: "[location_trigger], [weather], [time of day], [season], [lighting]"
+# - Example: "santorini island, sunny day, golden hour, summer, warm lighting, blue domes"
+# - Consistent location trigger (e.g., "santorini island", "tokyo cyberpunk", "fantasy forest")
+# - Mix of wide shots (50%), medium shots (30%), detail shots (20%)
+# - Capture characteristic architectural elements, vegetation, terrain features
+# - Include both establishing shots and atmospheric details
+
+# Note: The following settings are overridden by train_dgx_spark_qwen_lora.py
+# unified_memory: true
+# disable_cpu_offload: true
+# pin_memory: false
+# disable_quantization: true
+# quantize: false
+# adam8bit: false
+# cuda_13_features.enable_flash_attention_3: false
+# cuda_13_features.enable_cudnn_sdp: true
+# cuda_13_features.enable_tf32_compute: true

@@ -1,0 +1,69 @@
+# train_configs/train_dgx_spark_qwen_lora_style.yaml
+# DGX Spark optimized Qwen-Image LoRA training - STYLE/ARTISTIC FOCUS
+# Optimized for learning artistic styles, textures, color palettes, brush strokes
+# Settings will be overridden by train_dgx_spark_qwen_lora.py
+
+pretrained_model_name_or_path: "Qwen/Qwen-Image"
+output_dir: "output/dgx_spark_qwen_lora_style"
+logging_dir: "logs"
+
+# Training hyperparameters - Style focus
+# Moderate rank for style patterns without overfitting
+# Higher learning rate for faster style convergence
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"
+report_to: "tensorboard"
+learning_rate: 4e-4  # Higher for faster artistic style learning
+max_train_steps: 2500  # Fewer steps - styles converge faster
+checkpointing_steps: 250
+checkpoints_total_limit: 10
+seed: 42
+
+# Optimizer settings
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.02  # Slightly higher to prevent overfitting to specific images
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# Learning rate schedule
+lr_scheduler: constant  # Constant for consistent style learning
+lr_warmup_steps: 50  # Shorter warmup
+
+# LoRA configuration - Style focus
+rank: 16  # Moderate rank - styles are lower-dimensional than identity
+
+# Data configuration
+data_config:
+  img_dir: "data/style_training"  # UPDATE THIS
+  img_size: 1024
+  train_batch_size: 4  # Will be overridden by script
+  num_workers: 4  # Will be overridden by script
+  caption_dropout_rate: 0.2  # Higher dropout - focus on visual style, not content
+  random_ratio: true  # Allow varied crops to capture style at different scales
+  caption_type: txt
+
+# Embedding cache
+precompute_text_embeddings: true
+precompute_image_embeddings: true
+save_cache_on_disk: true
+
+# Training tips for style/artistic LoRA:
+# - Use 10-25 diverse images showing the style consistently
+# - Include variety in subjects but consistent style application
+# - Captions should focus on style elements: "[style_trigger], [medium], [technique], [color palette]"
+# - Example: "in monet style, impressionist painting, visible brushstrokes, pastel colors"
+# - Consistent style trigger word (e.g., "in monet style", "ukiyoe style", "cyberpunk style")
+# - Mix of subjects: portraits, landscapes, still life - all in target style
+# - Avoid overly detailed captions about content - focus on style descriptors
+
+# Note: The following settings are overridden by train_dgx_spark_qwen_lora.py
+# unified_memory: true
+# disable_cpu_offload: true
+# pin_memory: false
+# disable_quantization: true
+# quantize: false
+# adam8bit: false
+# cuda_13_features.enable_flash_attention_3: false
+# cuda_13_features.enable_cudnn_sdp: true
+# cuda_13_features.enable_tf32_compute: true

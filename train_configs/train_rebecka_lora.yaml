@@ -1,0 +1,35 @@
+pretrained_model_name_or_path: Qwen/Qwen-Image
+data_config:
+  train_batch_size: 3  # Batch size for bucketing (will vary by bucket)
+  num_workers: 8  # More workers for faster data loading with 133 images
+  img_size: 1024  # Base size (overridden by buckets: 768-1344 range)
+  caption_dropout_rate: 0.03  # Minimal dropout for highest quality with good captions
+  img_dir: /mnt/storage/rebecka
+  random_ratio: false  # Not used with bucketing
+  use_bucketing: true  # Enable aspect ratio bucketing for better composition
+  caption_type: txt
+report_to: null
+train_batch_size: 3  # Batch size (3 works well for 1.3-1.7M pixel buckets)
+output_dir: ./output_rebecka_lora
+max_train_steps: 8000  # Extended training for maximum quality - ~60 epochs
+learning_rate: 1e-4  # Standard high-quality LoRA learning rate
+lr_scheduler: cosine  # Cosine annealing for optimal convergence
+lr_warmup_steps: 100  # Longer warmup for stability with higher LR
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+logging_dir: logs
+mixed_precision: "bf16"
+checkpointing_steps: 200  # Save every 200 steps for monitoring progress
+checkpoints_total_limit: 30  # Keep last 20 checkpoints to find best quality
+tracker_project_name: rebecka_lora_training
+resume_from_checkpoint: latest
+gradient_accumulation_steps: 3  # Effective batch size of 9 (3×3) for stable gradients
+rank: 64  # Higher rank = more capacity for fine details and character features
+precompute_text_embeddings: true  # Cache text embeddings to save VRAM
+precompute_image_embeddings: true  # Cache image embeddings to save VRAM
+quantize: true  # Use 8-bit quantization for transformer weights
+adam8bit: true  # Use 8-bit Adam optimizer to reduce memory
+save_cache_on_disk: true  # Save embeddings to disk instead of RAM

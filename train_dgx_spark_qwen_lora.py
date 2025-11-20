@@ -34,8 +34,8 @@ torch.backends.cuda.enable_flash_sdp(False)  # Disable Flash Attention
 torch.backends.cuda.enable_math_sdp(True)    # Enable math fallback
 torch.backends.cuda.enable_mem_efficient_sdp(False)  # DISABLE - triggers FA sm80 kernels on sm_121
 try:
-    # cuDNN backend is only available on newer PyTorch versions
-    torch.backends.cuda.enable_cudnn_sdp(True)  # Enable cuDNN SDPA (stable on ARM64)
+    # TESTING: Disable cuDNN SDPA to isolate deadlock issue
+    torch.backends.cuda.enable_cudnn_sdp(False)  # DISABLED - testing if causing forward pass deadlock
 except AttributeError:
     pass  # Older PyTorch version
 from accelerate import Accelerator
@@ -114,7 +114,7 @@ DGX_SPARK_OVERRIDES = {
     "disable_cpu_offload": True,
     "pin_memory": False,
     "disable_quantization": True,
-    "disable_gradient_checkpointing": False,  # Must enable - forward pass needs ~46GB for activations
+    "disable_gradient_checkpointing": True,  # TESTING: Disable to check if causing deadlock
 
     # Precision
     "quantize": False,
@@ -308,9 +308,8 @@ def load_models_for_dgx_spark(args, weight_dtype, device):
     transformer = QwenImageTransformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="transformer",
-        torch_dtype=weight_dtype
     )
-    transformer.to(device)
+    transformer.to(device, dtype=weight_dtype)
     logger.info("  ✓ Transformer loaded to unified memory")
 
     # Configure gradient checkpointing based on config
@@ -334,6 +333,7 @@ def load_models_for_dgx_spark(args, weight_dtype, device):
     )
     transformer.add_adapter(lora_config)
     logger.info(f"  ✓ LoRA adapter added (rank={args.rank})")
+
 
     # Load noise scheduler
     noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
@@ -703,22 +703,52 @@ def train_loop(
 
                 # Calculate image shapes and text sequence lengths for RoPE
                 img_shapes = [(1, noisy_latents.shape[3] // 2, noisy_latents.shape[4] // 2)] * bsz
-                txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+                # CRITICAL: Use padded dimension, not actual lengths, to match transformer's query/key tensors
+                txt_seq_lens = [prompt_embeds.shape[1]] * bsz
 
                 # Predict noise
                 if step == 0:
                     import sys
-                    logger.info("  Running transformer forward pass...")
-                    logger.info(f"    packed_noisy_latents: {packed_noisy_latents.device}, {packed_noisy_latents.shape}")
-                    logger.info(f"    timesteps: {timesteps.device}, {timesteps.shape}")
-                    logger.info(f"    prompt_embeds: {prompt_embeds.device}, {prompt_embeds.shape}")
-                    logger.info(f"    prompt_embeds_mask: {prompt_embeds_mask.device}, {prompt_embeds_mask.shape}")
-                    logger.info(f"    transformer device: {next(transformer.parameters()).device}")
+                    logger.info("=" * 80)
+                    logger.info("COMPREHENSIVE DEBUG OUTPUT - FIRST BATCH")
+                    logger.info("=" * 80)
+                    logger.info(f"  Batch size (bsz): {bsz}")
+                    logger.info(f"  Original latents shape (after permute): {latents.shape}")
+                    logger.info(f"  Noisy latents shape (after noise addition): {noisy_latents.shape}")
+                    logger.info(f"    - noisy_latents.shape[0] (B): {noisy_latents.shape[0]}")
+                    logger.info(f"    - noisy_latents.shape[1] (T): {noisy_latents.shape[1]}")
+                    logger.info(f"    - noisy_latents.shape[2] (C): {noisy_latents.shape[2]}")
+                    logger.info(f"    - noisy_latents.shape[3] (H): {noisy_latents.shape[3]}")
+                    logger.info(f"    - noisy_latents.shape[4] (W): {noisy_latents.shape[4]}")
+                    logger.info(f"  Packed noisy latents shape: {packed_noisy_latents.shape}")
+                    logger.info(f"  Image shapes for RoPE: {img_shapes}")
+                    logger.info(f"    - Format: [(T, H//2, W//2)] * batch_size")
+                    logger.info(f"    - T=1, H//2={noisy_latents.shape[3] // 2}, W//2={noisy_latents.shape[4] // 2}")
+                    logger.info(f"  Text embeddings shape: {prompt_embeds.shape}")
+                    logger.info(f"  Text mask shape: {prompt_embeds_mask.shape}")
+                    logger.info(f"  Text sequence lengths: {txt_seq_lens}")
+                    logger.info(f"    - prompt_embeds_mask sum per sample: {prompt_embeds_mask.sum(dim=1).tolist()}")
+                    logger.info(f"    - max text seq len: {max(txt_seq_lens)}")
+                    logger.info(f"    - min text seq len: {min(txt_seq_lens)}")
+                    logger.info(f"  Timesteps: {timesteps.shape} = {timesteps.tolist()}")
+                    logger.info(f"  Transformer device: {next(transformer.parameters()).device}")
+                    logger.info(f"  VAE scale factor: {vae_scale_factor}")
+                    logger.info("=" * 80)
                     sys.stdout.flush()
                     sys.stderr.flush()
+
+                # CRITICAL: Force CUDA synchronization before forward pass (ARM64 + Blackwell bug workaround)
+                if step == 0:
+                    logger.info("  Forcing CUDA synchronization...")
+                    torch.cuda.synchronize()
+                    logger.info(f"  Input dtypes: latents={packed_noisy_latents.dtype}, embeds={prompt_embeds.dtype}, mask={prompt_embeds_mask.dtype}")
+                    logger.info(f"  Mask device: {prompt_embeds_mask.device}")
+                    sys.stdout.flush()
+
                 model_pred = transformer(
                     hidden_states=packed_noisy_latents,
                     timestep=timesteps,
+                    guidance=None,
                     encoder_hidden_states=prompt_embeds,
                     encoder_hidden_states_mask=prompt_embeds_mask,
                     img_shapes=img_shapes,
@@ -868,7 +898,7 @@ def main():
         early_logger.warning(f"  cuDNN SDPA:          NOT AVAILABLE (PyTorch version)")
     early_logger.warning("  → Flash Attention is DISABLED (unstable on ARM64 + sm_121)")
     early_logger.warning("  → Memory-Efficient SDPA DISABLED (triggers FA sm80 kernels on sm_121)")
-    early_logger.warning("  → Using cuDNN SDPA + Math fallback backends only")
+    early_logger.warning("  → TESTING: cuDNN SDPA disabled, using Math backend only (isolating deadlock)")
     early_logger.warning("=" * 80)
 
     # Step 4: Initialize memory monitor

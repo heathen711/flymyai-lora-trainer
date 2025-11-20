@@ -227,7 +227,13 @@ class CustomImageDataset(Dataset):
                         txt_embs = load_embeddings_safetensors(safetensors_path)
                     else:
                         txt_embs = torch.load(pt_path)
-                    return img, txt_embs['prompt_embeds'], txt_embs['prompt_embeds_mask']
+
+                    # CRITICAL FIX: Sanitize mask to remove corrupted values
+                    # Safetensors cache may have garbage int64 values beyond valid sequence
+                    mask = txt_embs['prompt_embeds_mask'].clone()
+                    mask = torch.clamp(mask, 0, 1)  # Ensure only 0s and 1s
+
+                    return img, txt_embs['prompt_embeds'], mask
                 else:
                     # Try .safetensors first (new format), fallback to .pt (old format)
                     txt_name = txt_path.split('/')[-1]
@@ -239,14 +245,25 @@ class CustomImageDataset(Dataset):
                     else:
                         txt_embs = torch.load(pt_path)
 
-                    return img, txt_embs['prompt_embeds'], txt_embs['prompt_embeds_mask']
+                    # CRITICAL FIX: Sanitize mask to remove corrupted values
+                    # Safetensors cache may have garbage int64 values beyond valid sequence
+                    mask = txt_embs['prompt_embeds_mask'].clone()
+                    mask = torch.clamp(mask, 0, 1)  # Ensure only 0s and 1s
+
+                    return img, txt_embs['prompt_embeds'], mask
             else:
                 # Clone cached embeddings to ensure resizable storage for DataLoader batching
                 txt = txt_path.split('/')[-1]
                 if throw_one(self.caption_dropout_rate):
-                    return img, self.cached_text_embeddings['empty_embedding']['prompt_embeds'].clone(), self.cached_text_embeddings['empty_embedding']['prompt_embeds_mask'].clone()
+                    # CRITICAL FIX: Sanitize mask to remove corrupted values
+                    mask = self.cached_text_embeddings['empty_embedding']['prompt_embeds_mask'].clone()
+                    mask = torch.clamp(mask, 0, 1)
+                    return img, self.cached_text_embeddings['empty_embedding']['prompt_embeds'].clone(), mask
                 else:
-                    return img, self.cached_text_embeddings[txt]['prompt_embeds'].clone(), self.cached_text_embeddings[txt]['prompt_embeds_mask'].clone()
+                    # CRITICAL FIX: Sanitize mask to remove corrupted values
+                    mask = self.cached_text_embeddings[txt]['prompt_embeds_mask'].clone()
+                    mask = torch.clamp(mask, 0, 1)
+                    return img, self.cached_text_embeddings[txt]['prompt_embeds'].clone(), mask
         except Exception as e:
             print(e)
             return self.__getitem__(random.randint(0, len(self.images) - 1))

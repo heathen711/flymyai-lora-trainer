@@ -476,3 +476,4 @@ pip install ~/Documents/DGX-Spark-PyTorch/wheels/torch-*.whl \
 - **ARM64 Compatibility:** docs/AARCH64_SBSA_COMPATIBILITY.md
 - **Unified Memory Plan:** docs/plans/2025-11-16-dgx-spark-unified-memory.md (completed)
 - **FastSafeTensors:** docs/FASTSAFETENSORS_INTEGRATION.md
+- Not allowed to run the training, only the user can run training

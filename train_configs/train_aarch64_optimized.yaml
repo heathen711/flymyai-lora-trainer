@@ -25,7 +25,7 @@ data_config:
 
 # CUDA 13.0 Optimizations for aarch64-sbsa
 # NOTE: Flash Attention 3 is NOT STABLE on CUDA 13.0 + aarch64
-cuda_13_features:
+cuda_features:
   enable_flash_attention_3: false  # DISABLED - unstable with GCC13 on aarch64
   enable_fp8_training: false       # Test stability before enabling
   enable_tf32_compute: true        # Fully supported

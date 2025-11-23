@@ -193,8 +193,8 @@ DGX_SPARK_OVERRIDES = {
     # Data Loading - Save embeddings to disk and load on demand per step
     "save_cache_on_disk": True,
 
-    # CUDA 13.0 Features
-    "cuda_13_features": {
+    # CUDA Features (version-agnostic)
+    "cuda_features": {
         "enable_flash_attention_3": False,  # Unstable on ARM64
         "enable_cudnn_sdp": True,
         "enable_tf32_compute": True,
@@ -255,17 +255,28 @@ def override_config_for_dgx_spark(user_config):
     # Deep copy to avoid modifying original
     final_config = OmegaConf.create(user_config)
 
+    # Backward compatibility: migrate cuda_13_features -> cuda_features
+    if hasattr(user_config, 'cuda_13_features') and not hasattr(user_config, 'cuda_features'):
+        early_logger.warning("=" * 80)
+        early_logger.warning("DEPRECATED CONFIG KEY DETECTED")
+        early_logger.warning("=" * 80)
+        early_logger.warning("Config uses deprecated 'cuda_13_features' key.")
+        early_logger.warning("Please update to 'cuda_features' (version-agnostic).")
+        early_logger.warning("Automatically migrating for this run.")
+        early_logger.warning("=" * 80)
+        final_config.cuda_features = user_config.cuda_13_features
+
     # Apply overrides and log changes
     for key, value in DGX_SPARK_OVERRIDES.items():
-        if key == "cuda_13_features":
+        if key == "cuda_features":
             # Handle nested dict
-            if not hasattr(final_config, "cuda_13_features"):
-                final_config.cuda_13_features = {}
+            if not hasattr(final_config, "cuda_features"):
+                final_config.cuda_features = {}
             for sub_key, sub_value in value.items():
-                old_value = getattr(final_config.cuda_13_features, sub_key, None)
+                old_value = getattr(final_config.cuda_features, sub_key, None)
                 if old_value != sub_value:
-                    early_logger.info(f"  cuda_13_features.{sub_key}: {old_value} → {sub_value}")
-                setattr(final_config.cuda_13_features, sub_key, sub_value)
+                    early_logger.info(f"  cuda_features.{sub_key}: {old_value} → {sub_value}")
+                setattr(final_config.cuda_features, sub_key, sub_value)
         else:
             old_value = getattr(final_config, key, None)
             if old_value != value:
@@ -979,14 +990,25 @@ def main():
         warning_threshold_gb=WARNING_THRESHOLD_GB
     )
 
-    # Step 5: Setup logging
+    # Step 5: Set random seed for reproducibility (BEFORE Accelerator init)
+    if hasattr(args, 'seed') and args.seed is not None:
+        import random
+        import numpy as np
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        early_logger.info(f"Set random seed to {args.seed} for reproducibility")
+
+    # Step 6: Setup logging
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(
         project_dir=args.output_dir,
         logging_dir=logging_dir
     )
 
-    # Step 6: Initialize Accelerator
+    # Step 7: Initialize Accelerator
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
@@ -1012,9 +1034,29 @@ def main():
         transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
 
-    # Enable TF32
-    enable_tf32()
-    logger.info("TF32 compute enabled")
+    # Apply CUDA feature flags from config
+    if hasattr(args, 'cuda_features'):
+        if getattr(args.cuda_features, 'enable_tf32_compute', False):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            logger.info("TF32 compute enabled via cuda_features config")
+
+        if getattr(args.cuda_features, 'enable_cudnn_sdp', False):
+            try:
+                torch.backends.cuda.enable_cudnn_sdp(True)
+                logger.info("cuDNN SDP enabled via cuda_features config")
+            except AttributeError:
+                logger.warning("cuDNN SDP not available in this PyTorch version")
+
+        if getattr(args.cuda_features, 'enable_flash_attention_3', False):
+            logger.warning("Flash Attention 3 requested but not yet implemented in training loop")
+
+        if getattr(args.cuda_features, 'enable_fp8_training', False):
+            logger.warning("FP8 training requested but not yet implemented")
+    else:
+        # Fallback to legacy enable_tf32() function
+        enable_tf32()
+        logger.info("TF32 compute enabled (legacy path)")
 
     # Create output directory
     if accelerator.is_main_process:

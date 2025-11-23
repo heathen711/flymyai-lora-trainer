@@ -68,6 +68,6 @@ save_cache_on_disk: true
 # disable_quantization: true
 # quantize: false
 # adam8bit: false
-# cuda_13_features.enable_flash_attention_3: false
-# cuda_13_features.enable_cudnn_sdp: true
-# cuda_13_features.enable_tf32_compute: true
+# cuda_features.enable_flash_attention_3: false
+# cuda_features.enable_cudnn_sdp: true
+# cuda_features.enable_tf32_compute: true

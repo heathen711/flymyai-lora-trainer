@@ -1,0 +1,83 @@
+# train_configs/train_cuda12.9_qwen_lora_rebecka_minimal.yaml
+# CUDA 12.9 minimal memory footprint - REBECKA DATASET
+# Optimized for proving training works with smallest memory usage
+# Quality reduced in favor of memory efficiency
+
+pretrained_model_name_or_path: "Qwen/Qwen-Image"
+output_dir: "output/cuda12.9_qwen_lora_rebecka_minimal"
+logging_dir: "logs/rebecka_minimal"
+
+resume_from_checkpoint: null
+
+# Training hyperparameters - Minimal memory configuration
+# Reduced quality settings for proof of concept
+gradient_accumulation_steps: 2  # Reduce effective batch size
+mixed_precision: "bf16"
+report_to: "tensorboard"
+learning_rate: 1e-4  # Lower learning rate for stability with smaller batch
+max_train_steps: 2000  # Reduced for quick proof of concept
+checkpointing_steps: 500
+checkpoints_total_limit: 3  # Keep fewer checkpoints
+seed: 42
+
+# Optimizer settings
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# Learning rate schedule
+lr_scheduler: cosine
+lr_warmup_steps: 50  # Shorter warmup for reduced training steps
+
+# LoRA configuration - Minimal rank for memory efficiency
+rank: 8  # Reduced from 32 to minimize memory usage
+
+# Data configuration - Rebecka dataset
+data_config:
+  img_dir: "dataset/rebecka"
+  img_size: 1024
+  train_batch_size: 1  # Minimal batch size
+  num_workers: 2  # Reduced workers to save memory
+  caption_dropout_rate: 0.0  # No dropout - captions are just trigger word
+  random_ratio: false
+  caption_type: txt
+
+# Embedding cache
+precompute_text_embeddings: true
+precompute_image_embeddings: true
+save_cache_on_disk: false  # Keep in unified memory (faster than disk)
+
+# Memory optimization settings - DGX Spark unified memory
+unified_memory: true  # DGX Spark Blackwell with unified memory
+disable_cpu_offload: true  # No CPU offloading on unified memory (counterproductive)
+pin_memory: false  # Not needed for unified memory
+disable_quantization: false  # Keep quantization for minimal memory proof
+quantize: true  # 8-bit quantization via optimum.quanto
+adam8bit: true  # 8-bit Adam optimizer to reduce memory
+disable_gradient_checkpointing: false  # Enable gradient checkpointing
+save_cache_on_disk: false  # Keep embeddings in unified memory (faster)
+
+# FastSafeTensors
+use_fastsafetensors: true
+fastsafetensors_num_threads: 4
+
+# CUDA feature flags - Conservative settings (version-agnostic)
+cuda_features:
+  enable_tf32_compute: true  # Safe performance boost
+  enable_cudnn_sdp: true  # Stable attention implementation
+  enable_flash_attention_2: false  # Disabled for stability
+  enable_fp8_training: false  # Not needed for minimal config
+
+# Dataset details:
+# - 133 images with single trigger word captions ("R3b3ck4")
+# - Simplified captions for minimal memory overhead
+# - Proof of concept configuration - optimize quality later
+#
+# Training approach:
+# - Minimal memory footprint for CUDA 12.9 venv
+# - Quantization + 8-bit Adam + gradient checkpointing
+# - Small batch size and LoRA rank
+# - Reduced training steps for quick validation
+# - Test at steps 500, 1000, 1500, 2000

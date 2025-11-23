@@ -23,7 +23,7 @@ data_config:
   img_size: 1024
 
 # CUDA 13.0 Optimizations
-cuda_13_features:
+cuda_features:
   enable_flash_attention_3: true   # Hopper+ (H100, H200)
   enable_fp8_training: false       # Optional FP8
   enable_tf32_compute: true        # Ampere+

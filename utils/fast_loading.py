@@ -22,7 +22,8 @@ from safetensors.torch import save_file as st_save_file
 def load_safetensors(
     path: str,
     num_threads: int = 8,
-    device: str = "cpu"
+    device: str = "cpu",
+    use_fast: bool = True
 ) -> Dict[str, torch.Tensor]:
     """
     Load a safetensors file using fastsafetensors for optimized performance.
@@ -31,6 +32,7 @@ def load_safetensors(
         path: Path to the safetensors file
         num_threads: Number of threads (reserved for future API compatibility)
         device: Device to load tensors to (default: "cpu")
+        use_fast: Whether to use fastsafetensors if available (default: True)
 
     Returns:
         Dictionary of tensor name to tensor
@@ -43,7 +45,7 @@ def load_safetensors(
         raise FileNotFoundError(f"Safetensors file not found: {path}")
 
     try:
-        if FASTSAFETENSORS_AVAILABLE:
+        if use_fast and FASTSAFETENSORS_AVAILABLE:
             state_dict = {}
             with fastsafe_open(path, framework="pt", device=device) as f:
                 for key in f.keys():
@@ -91,7 +93,8 @@ def is_fastsafetensors_available() -> bool:
 def load_safetensors_mmap(
     path: str,
     keys: Optional[list] = None,
-    device: str = "cpu"
+    device: str = "cpu",
+    use_fast: bool = True
 ) -> Dict[str, torch.Tensor]:
     """
     Load specific tensors from a safetensors file using memory mapping.
@@ -103,6 +106,7 @@ def load_safetensors_mmap(
         path: Path to the safetensors file
         keys: List of specific tensor keys to load (None = load all)
         device: Device to load tensors to
+        use_fast: Whether to use fastsafetensors if available (default: True)
 
     Returns:
         Dictionary of tensor name to tensor
@@ -111,7 +115,7 @@ def load_safetensors_mmap(
         raise FileNotFoundError(f"Safetensors file not found: {path}")
 
     try:
-        if FASTSAFETENSORS_AVAILABLE:
+        if use_fast and FASTSAFETENSORS_AVAILABLE:
             state_dict = {}
             with fastsafe_open(path, framework="pt", device=device) as f:
                 load_keys = keys if keys is not None else f.keys()
@@ -197,7 +201,9 @@ def save_safetensors_sharded(
 
 def load_safetensors_sharded(
     model_dir: str,
-    device: str = "cpu"
+    device: str = "cpu",
+    use_fast: bool = True,
+    num_threads: int = 8
 ) -> Dict[str, torch.Tensor]:
     """
     Load a sharded model from multiple safetensors files.
@@ -205,6 +211,8 @@ def load_safetensors_sharded(
     Args:
         model_dir: Directory containing sharded safetensors files
         device: Device to load tensors to
+        use_fast: Whether to use fastsafetensors if available (default: True)
+        num_threads: Number of threads (reserved for future API compatibility)
 
     Returns:
         Combined dictionary of all tensors
@@ -225,7 +233,7 @@ def load_safetensors_sharded(
     state_dict = {}
     for shard_file in shard_files:
         shard_path = os.path.join(model_dir, shard_file)
-        shard_dict = load_safetensors(shard_path, device=device)
+        shard_dict = load_safetensors(shard_path, device=device, use_fast=use_fast, num_threads=num_threads)
         state_dict.update(shard_dict)
 
     return state_dict
@@ -252,7 +260,9 @@ def save_embeddings_safetensors(
 
 def load_embeddings_safetensors(
     path: str,
-    device: str = "cpu"
+    device: str = "cpu",
+    use_fast: bool = True,
+    num_threads: int = 8
 ) -> Dict[str, torch.Tensor]:
     """
     Load embeddings from a safetensors file.
@@ -262,8 +272,10 @@ def load_embeddings_safetensors(
     Args:
         path: Path to embeddings file
         device: Device to load to
+        use_fast: Whether to use fastsafetensors if available (default: True)
+        num_threads: Number of threads (reserved for future API compatibility)
 
     Returns:
         Dictionary of embedding tensors
     """
-    return load_safetensors(path, device=device)
+    return load_safetensors(path, device=device, use_fast=use_fast, num_threads=num_threads)

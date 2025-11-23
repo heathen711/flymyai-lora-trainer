@@ -60,7 +60,7 @@ precompute_image_embeddings: true
 save_cache_on_disk: false  # Keep in memory
 
 # CUDA 13.0 Features (Grace Hopper supports these)
-cuda_13_features:
+cuda_features:
   enable_flash_attention_3: true   # Hopper architecture
   enable_fp8_training: false       # Can be enabled if needed
   enable_tf32_compute: true        # Better performance

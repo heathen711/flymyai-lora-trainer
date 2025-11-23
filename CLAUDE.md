@@ -177,7 +177,7 @@ All training configs are YAML files in `train_configs/` with a common structure 
 
 #### CUDA 13.0 Feature Flags
 
-**cuda_13_features.enable_flash_attention_3** (bool)
+**cuda_features.enable_flash_attention_3** (bool)
 - **Purpose:** Enable Flash Attention 3 (Hopper/Blackwell only)
 - **Requirements:** CUDA 13.0 + sm_90 or higher
 - **WARNING:** Unstable on ARM64 with GCC13 (see docs/AARCH64_SBSA_COMPATIBILITY.md)
@@ -187,7 +187,7 @@ All training configs are YAML files in `train_configs/` with a common structure 
   - Known issues with head_dim in (192, 224] on sm_121
 - **Config location:** train_dgx_spark.yaml (true), train_aarch64_optimized.yaml (false - unstable)
 
-**cuda_13_features.enable_fp8_training** (bool)
+**cuda_features.enable_fp8_training** (bool)
 - **Purpose:** Enable native FP8 training (Hopper/Blackwell)
 - **Requirements:** CUDA 13.0 + sm_90+
 - **Implications:**
@@ -196,7 +196,7 @@ All training configs are YAML files in `train_configs/` with a common structure 
   - Not needed for most workloads (bf16 sufficient)
 - **Config location:** train_dgx_spark.yaml (false), train_cuda13_optimized.yaml (false)
 
-**cuda_13_features.enable_tf32_compute** (bool)
+**cuda_features.enable_tf32_compute** (bool)
 - **Purpose:** Enable TensorFloat-32 compute (Ampere+)
 - **Requirements:** sm_80+ (A100, RTX 30xx/40xx, Hopper, Blackwell)
 - **Implications:**
@@ -205,7 +205,7 @@ All training configs are YAML files in `train_configs/` with a common structure 
   - Safe to enable on all Ampere+ GPUs
 - **Config location:** All configs (true for sm_80+)
 
-**cuda_13_features.enable_cudnn_sdp** (bool)
+**cuda_features.enable_cudnn_sdp** (bool)
 - **Purpose:** Use cuDNN scaled dot-product attention
 - **When to use:** Alternative to Flash Attention (more stable on ARM64)
 - **Implications:**
@@ -260,8 +260,8 @@ Is this DGX Spark (sm_121)?
 │   ├─ pin_memory: false
 │   ├─ disable_quantization: true (128GB unified memory)
 │   ├─ disable_gradient_checkpointing: true
-│   ├─ cuda_13_features.enable_flash_attention_3: false (unstable on ARM64)
-│   └─ cuda_13_features.enable_cudnn_sdp: true (stable alternative)
+│   ├─ cuda_features.enable_flash_attention_3: false (unstable on ARM64)
+│   └─ cuda_features.enable_cudnn_sdp: true (stable alternative)
 │
 └─ No → Is VRAM >= 80GB?
     ├─ Yes → Use train_lora.yaml (standard config)

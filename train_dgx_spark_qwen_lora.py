@@ -33,7 +33,7 @@ import torch
 # PyTorch will use flash-attn package when available, fallback to built-in backends
 # Must be set before any model loading
 torch.backends.cuda.enable_flash_sdp(True)   # Uses flash-attn 2.8.3 with GQA support
-torch.backends.cuda.enable_math_sdp(True)    # Fallback (shouldn't be used now)
+torch.backends.cuda.enable_math_sdp(True)    # Enabled as fallback for standard attention (VAE encoder) - transformer uses GQA path which bypasses this via flash_attn_func
 torch.backends.cuda.enable_mem_efficient_sdp(False)  # DISABLE - triggers FA sm80 kernels on sm_121
 try:
     torch.backends.cuda.enable_cudnn_sdp(True)  # Enable as additional fallback
@@ -53,30 +53,43 @@ try:
 
     def _flash_attn_gqa_wrapper(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, **kwargs):
         """
-        Wrapper that uses flash_attn_func for GQA, falls back to original SDPA otherwise.
+        Wrapper that uses flash_attn_func when possible, falls back to cuDNN SDPA (NOT Math) otherwise.
+        Avoids Math SDPA deadlock on ARM64+Blackwell.
 
         Flash Attention requires:
         - Input shape: (batch, seqlen, num_heads, head_dim)
         - PyTorch SDPA uses: (batch, num_heads, seqlen, head_dim)
+        - head_dim <= 256
 
         Accepts **kwargs to handle additional parameters like 'enable_gqa' from transformers.
         """
-        # Check if GQA: query heads != key heads
-        q_heads = query.shape[1]  # (batch, num_heads, seqlen, head_dim)
-        k_heads = key.shape[1]
+        head_dim = query.shape[-1]  # (batch, num_heads, seqlen, head_dim)
 
-        if q_heads != k_heads:
-            # GQA detected - use flash_attn_func
+        # DEBUG: Log first attention call to verify monkey patch is working
+        if not hasattr(_flash_attn_gqa_wrapper, '_logged_first_call'):
+            print(f"[MONKEY PATCH] First call: head_dim={head_dim}, query.shape={query.shape}")
+            _flash_attn_gqa_wrapper._logged_first_call = True
+
+        # Use flash_attn_func if head_dim <= 256
+        if head_dim <= 256:
             # Transpose: (B, H, S, D) -> (B, S, H, D)
             q = query.transpose(1, 2).contiguous()
             k = key.transpose(1, 2).contiguous()
             v = value.transpose(1, 2).contiguous()
 
-            # Flash Attention doesn't support attn_mask or custom scale yet
+            # Flash Attention doesn't support attn_mask
             if attn_mask is not None:
-                raise NotImplementedError("flash_attn_func doesn't support attn_mask")
+                # Fall back to PyTorch's dispatcher (cuDNN or Math SDPA)
+                return _original_sdpa(
+                    query, key, value,
+                    attn_mask=attn_mask,
+                    dropout_p=dropout_p,
+                    is_causal=is_causal,
+                    scale=scale,
+                    **kwargs
+                )
 
-            # Call flash_attn_func with GQA support
+            # Call flash_attn_func (supports both GQA and standard attention)
             out = flash_attn_func(
                 q, k, v,
                 dropout_p=dropout_p,
@@ -87,19 +100,20 @@ try:
             # Transpose back: (B, S, H, D) -> (B, H, S, D)
             return out.transpose(1, 2)
         else:
-            # Standard attention - use PyTorch's built-in SDPA
+            # head_dim > 256: Let PyTorch choose backend (will use Math SDPA for VAE, which is safe during encoding)
+            # Transformer uses flash_attn path above, so Math SDPA deadlock doesn't occur during training
             return _original_sdpa(
                 query, key, value,
                 attn_mask=attn_mask,
                 dropout_p=dropout_p,
                 is_causal=is_causal,
                 scale=scale,
-                **kwargs  # Pass through any additional parameters
+                **kwargs
             )
 
     # Replace PyTorch's SDPA with our wrapper
     F.scaled_dot_product_attention = _flash_attn_gqa_wrapper
-    print("✅ Monkey-patched F.scaled_dot_product_attention to use flash_attn_func for GQA")
+    print("✅ Monkey-patched F.scaled_dot_product_attention: flash_attn (head_dim≤256) or PyTorch dispatcher (head_dim>256)")
 
 except ImportError:
     print("⚠️  flash-attn not available, using PyTorch's built-in SDPA (no GQA support)")
@@ -183,12 +197,12 @@ DGX_SPARK_OVERRIDES = {
     "disable_cpu_offload": True,  # DISABLE CPU offload - causes futex deadlock on ARM64
     "pin_memory": False,
     "disable_quantization": True,
-    "disable_gradient_checkpointing": False,  # ENABLE - Reduce activation memory by ~8-12GB
+    "disable_gradient_checkpointing": True,  # DISABLE - Causes numerical instability with NaN gradients
 
     # Precision
     "quantize": False,
-    "adam8bit": True,  # ENABLE - Save ~14GB optimizer memory (no CPU/GPU transfers)
-    "mixed_precision": "bf16",
+    "adam8bit": False,  # DISABLE - 128GB unified memory = no need for 8-bit, prevents numerical instability
+    "mixed_precision": "bf16",  # BF16 for Blackwell native support + larger dynamic range
 
     # Data Loading - Save embeddings to disk and load on demand per step
     "save_cache_on_disk": True,
@@ -197,7 +211,7 @@ DGX_SPARK_OVERRIDES = {
     "cuda_features": {
         "enable_flash_attention_3": False,  # Unstable on ARM64
         "enable_cudnn_sdp": True,
-        "enable_tf32_compute": True,
+        "enable_tf32_compute": True,  # Enable for performance boost on Blackwell
         "enable_fp8_training": False,
     },
 }
@@ -366,30 +380,34 @@ def load_models_for_dgx_spark(args, weight_dtype, device):
     logger.info("Loading models into unified memory (no offloading)...")
 
     # Load text encoding pipeline (stays on device)
+    # Pipeline doesn't support device_map, so we still use .to() but with torch_dtype set
     text_encoding_pipeline = QwenImagePipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         transformer=None,
         vae=None,
-        torch_dtype=weight_dtype
+        torch_dtype=weight_dtype,
     )
     text_encoding_pipeline.to(device)
     logger.info("  ✓ Text encoding pipeline loaded to unified memory")
 
     # Load VAE (stays on device)
+    # Use device_map to load directly to unified memory (avoids double allocation)
     vae = AutoencoderKLQwenImage.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="vae",
-        torch_dtype=weight_dtype
+        torch_dtype=weight_dtype,
+        device_map="cuda",
     )
-    vae.to(device)
     logger.info("  ✓ VAE loaded to unified memory")
 
     # Load transformer (stays on device)
+    # Use device_map to load directly to unified memory (avoids ~38GB double allocation)
     transformer = QwenImageTransformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="transformer",
+        torch_dtype=weight_dtype,
+        device_map="cuda",
     )
-    transformer.to(device, dtype=weight_dtype)
     logger.info("  ✓ Transformer loaded to unified memory")
 
     # Configure gradient checkpointing based on config
@@ -408,7 +426,7 @@ def load_models_for_dgx_spark(args, weight_dtype, device):
     lora_config = LoraConfig(
         r=args.rank,
         lora_alpha=args.rank,
-        init_lora_weights="gaussian",
+        init_lora_weights=True,  # Use default Kaiming init (lora_A) + zeros (lora_B) - more stable than gaussian
         target_modules=["to_k", "to_q", "to_v", "to_out.0"],
     )
     transformer.add_adapter(lora_config)
@@ -547,8 +565,8 @@ def precompute_embeddings(args, text_encoding_pipeline, vae, weight_dtype, accel
             logger.info("  Keeping image embeddings in unified memory")
 
         with torch.no_grad():
-            img_files = [i for i in os.listdir(args.data_config.img_dir) if is_image_file(i)]
-            for img_name in tqdm(img_files, desc="Encoding images"):
+            img_files = sorted([i for i in os.listdir(args.data_config.img_dir) if is_image_file(i)])
+            for idx, img_name in enumerate(tqdm(img_files, desc="Encoding images")):
                 img = Image.open(os.path.join(args.data_config.img_dir, img_name)).convert('RGB')
                 img = image_resize(img, args.data_config.img_size)
                 w, h = img.size
@@ -560,7 +578,23 @@ def precompute_embeddings(args, text_encoding_pipeline, vae, weight_dtype, accel
                 pixel_values = img.unsqueeze(2)
                 pixel_values = pixel_values.to(dtype=weight_dtype).to(accelerator.device)
 
-                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]
+                # Debug: Check pixel_values before VAE encoding
+                if idx < 5 or idx == len(img_files) - 1:
+                    logger.info(f"  [{idx}] {img_name}: pixel_values stats: min={pixel_values.min().item():.6f}, max={pixel_values.max().item():.6f}, mean={pixel_values.mean().item():.6f}")
+
+                latent_dist = vae.encode(pixel_values).latent_dist
+                pixel_latents = latent_dist.sample().to('cpu')[0]
+
+                # Debug: Check latents after VAE encoding
+                if idx < 5 or idx == len(img_files) - 1:
+                    logger.info(f"  [{idx}] {img_name}: latent stats: min={pixel_latents.min().item():.6f}, max={pixel_latents.max().item():.6f}, mean={pixel_latents.mean().item():.6f}")
+                    # Check if corrupted
+                    if torch.isnan(pixel_latents).any() or torch.isinf(pixel_latents).any() or pixel_latents.abs().max() > 1e10:
+                        logger.error(f"  [{idx}] CORRUPTED LATENTS DETECTED in {img_name}!")
+                        logger.error(f"    NaN count: {torch.isnan(pixel_latents).sum().item()}")
+                        logger.error(f"    Inf count: {torch.isinf(pixel_latents).sum().item()}")
+                        logger.error(f"    Max abs value: {pixel_latents.abs().max().item()}")
+
                 if args.save_cache_on_disk:
                     save_embeddings_safetensors(
                         {'latent': pixel_latents},
@@ -726,7 +760,10 @@ def train_loop(
         disable=not accelerator.is_local_main_process,
     )
 
+    early_stop = False  # Flag to stop training early
     for epoch in range(first_epoch, args.max_train_steps):
+        if early_stop:
+            break
         transformer.train()
 
         for step, batch in enumerate(train_dataloader):
@@ -741,9 +778,25 @@ def train_loop(
                 if step == 0:
                     logger.info("  Processing first batch...")
                     sys.stdout.flush()
+
+                # Debug: Check raw batch data for first 10 steps
+                if global_step < 10:
+                    raw_latents = batch["latents"]
+                    logger.info(f"  [Step {global_step}] RAW batch latents stats: min={raw_latents.min().item():.6f}, max={raw_latents.max().item():.6f}, mean={raw_latents.mean().item():.6f}, requires_grad={raw_latents.requires_grad}")
+                    # Check for corruption
+                    if torch.isnan(raw_latents).any() or torch.isinf(raw_latents).any() or raw_latents.abs().max() > 1e10:
+                        logger.error(f"  [Step {global_step}] CORRUPTED RAW LATENTS DETECTED!")
+                        logger.error(f"    NaN count: {torch.isnan(raw_latents).sum().item()}")
+                        logger.error(f"    Inf count: {torch.isinf(raw_latents).sum().item()}")
+                        logger.error(f"    Max abs value: {raw_latents.abs().max().item()}")
+
                 latents = batch["latents"].to(weight_dtype)
                 prompt_embeds = batch["prompt_embeds"].to(weight_dtype)
                 prompt_embeds_mask = batch["prompt_embeds_mask"].to(latents.device)
+
+                # Debug: Check after dtype conversion
+                if global_step < 5:
+                    logger.info(f"  [Step {global_step}] After .to() latents stats: min={latents.min().item():.6f}, max={latents.max().item():.6f}, mean={latents.mean().item():.6f}, requires_grad={latents.requires_grad}")
 
                 # Permute latents from [B, C, T, H, W] to [B, T, C, H, W] for transformer
                 latents = latents.permute(0, 2, 1, 3, 4)
@@ -759,9 +812,28 @@ def train_loop(
                 ).to(latents.device, latents.dtype)
                 latents = (latents - latents_mean) * latents_std
 
+                # Debug: Check after normalization
+                if global_step < 5:
+                    logger.info(f"  [Step {global_step}] After normalization latents stats: min={latents.min().item():.6f}, max={latents.max().item():.6f}, mean={latents.mean().item():.6f}")
+
+                # DEBUG: Before sampling noise
+                if global_step == 0:
+                    logger.info("  [DEBUG] About to sample noise...")
+                    sys.stdout.flush()
+
                 # Sample noise
                 noise = torch.randn_like(latents)
+
+                # DEBUG: After sampling noise
+                if global_step == 0:
+                    logger.info("  [DEBUG] Noise sampled successfully")
+                    sys.stdout.flush()
                 bsz = latents.shape[0]
+
+                # DEBUG: Before sampling timesteps
+                if global_step == 0:
+                    logger.info("  [DEBUG] About to sample timesteps...")
+                    sys.stdout.flush()
 
                 # Sample timesteps
                 u = torch.rand(bsz, device=latents.device)
@@ -770,9 +842,19 @@ def train_loop(
                 timesteps_gpu = noise_scheduler.timesteps.to(device=latents.device)
                 timesteps = timesteps_gpu[indices]
 
+                # DEBUG: After sampling timesteps
+                if global_step == 0:
+                    logger.info("  [DEBUG] Timesteps sampled successfully")
+                    sys.stdout.flush()
+
                 # Add noise to latents
                 sigmas = _get_sigmas(noise_scheduler, timesteps, len(latents.shape), latents.dtype)
                 noisy_latents = sigmas * noise + (1.0 - sigmas) * latents
+
+                # DEBUG: Before packing latents
+                if global_step == 0:
+                    logger.info("  [DEBUG] About to pack latents...")
+                    sys.stdout.flush()
 
                 # Pack latents for transformer input
                 packed_noisy_latents = QwenImagePipeline._pack_latents(
@@ -783,10 +865,20 @@ def train_loop(
                     noisy_latents.shape[4],
                 )
 
+                # DEBUG: After packing latents
+                if global_step == 0:
+                    logger.info("  [DEBUG] Latents packed successfully")
+                    sys.stdout.flush()
+
                 # Calculate image shapes and text sequence lengths for RoPE
                 img_shapes = [(1, noisy_latents.shape[3] // 2, noisy_latents.shape[4] // 2)] * bsz
                 # CRITICAL: Use padded dimension, not actual lengths, to match transformer's query/key tensors
                 txt_seq_lens = [prompt_embeds.shape[1]] * bsz
+
+                # DEBUG: Before transformer forward pass
+                if global_step == 0:
+                    logger.info("  [DEBUG] About to call transformer forward pass...")
+                    sys.stdout.flush()
 
                 # Predict noise
                 # DISABLED: Debug logging with .tolist() causes futex deadlock on ARM64 + CUDA 13.0
@@ -837,8 +929,10 @@ def train_loop(
                     txt_seq_lens=txt_seq_lens,
                     return_dict=False,
                 )[0]
-                if step == 0:
-                    logger.info("  Forward pass complete, unpacking...")
+
+                # DEBUG: After transformer forward pass
+                if global_step == 0:
+                    logger.info("  [DEBUG] Transformer forward pass complete, unpacking...")
                     sys.stdout.flush()
 
                 # Unpack model prediction to match target shape
@@ -855,13 +949,20 @@ def train_loop(
                     sigmas=sigmas,
                 )
                 target = latents
+
+                # Debug logging for first 5 steps
+                if global_step < 5:
+                    logger.info(f"  [Step {global_step}] model_pred stats: min={model_pred.min().item():.6f}, max={model_pred.max().item():.6f}, mean={model_pred.mean().item():.6f}")
+                    logger.info(f"  [Step {global_step}] target stats: min={target.min().item():.6f}, max={target.max().item():.6f}, mean={target.mean().item():.6f}")
+                    logger.info(f"  [Step {global_step}] weighting stats: min={weighting.min().item():.6f}, max={weighting.max().item():.6f}, mean={weighting.mean().item():.6f}")
+
                 loss = torch.mean(
                     (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(bsz, -1),
                     dim=1,
                 )
                 loss = loss.mean()
-                if step == 0:
-                    logger.info(f"  Loss computed: {loss.item():.4f}, running backward...")
+                if step == 0 or global_step < 5:
+                    logger.info(f"  [Step {global_step}] Loss computed: {loss.item():.4f}, running backward...")
                     sys.stdout.flush()
 
                 # Backward pass
@@ -871,7 +972,12 @@ def train_loop(
                     sys.stdout.flush()
 
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+                    # Log gradient norm before clipping for first 10 steps
+                    if global_step < 10:
+                        grad_norm = accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+                        logger.info(f"  [Step {global_step}] Gradient norm before clip: {grad_norm:.6f}, max_grad_norm: {args.max_grad_norm}")
+                    else:
+                        accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -881,6 +987,12 @@ def train_loop(
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+
+                # DEBUG: Auto-stop at step 10 for quick testing
+                if global_step >= 10:
+                    logger.warning(f"DEBUG: Auto-stopping at step {global_step}")
+                    early_stop = True
+                    break
 
                 # Memory monitoring every 10 steps
                 if global_step % 10 == 0:

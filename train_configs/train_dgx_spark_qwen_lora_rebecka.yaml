@@ -17,7 +17,7 @@ resume_from_checkpoint: null
 gradient_accumulation_steps: 1
 mixed_precision: "bf16"
 report_to: "tensorboard"
-learning_rate: 2.5e-4  # Slightly higher than default person config (133 images provide stability)
+learning_rate: 5e-5  # Conservative rate to prevent gradient explosion (was 2.5e-4, caused NaN at step 3)
 max_train_steps: 6000  # More steps for comprehensive feature learning
 checkpointing_steps: 300
 checkpoints_total_limit: 10
